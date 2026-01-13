@@ -370,12 +370,13 @@ def compute_heading_from_velocity(vx, vy):
     """Compute heading angle from velocity components."""
     return np.arctan2(vy, vx)
 
-def create_tracking_video(trajectory_data, filters_order, dist, output_filename, fps=10, duration=None, instance_idx=None, zoomed=False, zoom_radius=2.0):
+def create_tracking_video(trajectory_data, filters_order, dist, output_filename, fps=10, duration=None, instance_idx=None, zoomed=False, zoom_radius=2.0, output_format='gif'):
     """Create animated 3D video showing tracking with airplane for true state and markers for estimates.
-    
+
     Args:
         zoomed: If True, creates a zoomed view centered on the airplane
         zoom_radius: Radius of the zoomed view around the airplane
+        output_format: Output format ('gif' or 'mp4')
     """
     
     # Colors and markers for filters
@@ -485,11 +486,11 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
     
     # Create legend
     legend_handles = [true_line] + [trajectory_lines[filt] for filt in filters_order if filt in trajectory_data]
-    ax.legend(handles=legend_handles, loc='upper right', fontsize=18)
+    ax.legend(handles=legend_handles, loc='upper right', fontsize=24)
     
-    # Add time display in title position with large font and no background
-    time_text = ax.text2D(0.5, 0.95, '', transform=ax.transAxes, fontsize=36,
-                         horizontalalignment='center', verticalalignment='top', 
+    # Add time display above the instance/mean indicator on the left
+    time_text = ax.text2D(0.02, 0.98, '', transform=ax.transAxes, fontsize=44,
+                         horizontalalignment='left', verticalalignment='top',
                          weight='bold', color='black')
     
     if instance_idx is not None:
@@ -651,12 +652,15 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
     
     # Adjust layout
     plt.tight_layout()
-    
+
     # Save animation with higher DPI for better quality
     print(f"Saving video to: {output_filename}")
-    anim.save(output_filename, writer='pillow', fps=fps, dpi=100)
+    if output_format == 'mp4':
+        anim.save(output_filename, writer='ffmpeg', fps=fps, dpi=100)
+    else:  # gif
+        anim.save(output_filename, writer='pillow', fps=fps, dpi=100)
     plt.close(fig)
-    
+
     print(f"3D Video saved successfully!")
     return output_filename
 
@@ -668,8 +672,10 @@ def main():
                         help='Frames per second for video')
     parser.add_argument('--duration', type=float,
                         help='Duration in seconds (if not specified, uses full trajectory)')
-    parser.add_argument('--output', 
+    parser.add_argument('--output',
                         help='Output filename (if not specified, auto-generated)')
+    parser.add_argument('--format', default='gif', choices=['gif', 'mp4'],
+                        help='Output video format (default: gif)')
     args = parser.parse_args()
     
     try:
@@ -695,24 +701,24 @@ def main():
         if len(trajectory_data_mean) > 0:
             # Create normal view video
             if args.output is None:
-                output_filename_mean = f"tracking_video_MEAN_{args.dist}_fps{args.fps}.gif"
-                output_filename_mean_zoomed = f"tracking_video_MEAN_ZOOMED_{args.dist}_fps{args.fps}.gif"
+                output_filename_mean = f"tracking_video_MEAN_{args.dist}_fps{args.fps}.{args.format}"
+                output_filename_mean_zoomed = f"tracking_video_MEAN_ZOOMED_{args.dist}_fps{args.fps}.{args.format}"
             else:
                 output_filename_mean = f"MEAN_{args.output}"
                 output_filename_mean_zoomed = f"MEAN_ZOOMED_{args.output}"
-            
+
             output_path_mean = os.path.join(results_dir, output_filename_mean)
             output_path_mean_zoomed = os.path.join(results_dir, output_filename_mean_zoomed)
-            
+
             # Create normal mean video
             print("Creating normal view mean video...")
-            create_tracking_video(trajectory_data_mean, filters_order, args.dist, output_path_mean, 
-                                fps=args.fps, duration=args.duration, instance_idx=None, zoomed=False)
-            
+            create_tracking_video(trajectory_data_mean, filters_order, args.dist, output_path_mean,
+                                fps=args.fps, duration=args.duration, instance_idx=None, zoomed=False, output_format=args.format)
+
             # Create zoomed mean video
             print("Creating zoomed view mean video...")
-            create_tracking_video(trajectory_data_mean, filters_order, args.dist, output_path_mean_zoomed, 
-                                fps=args.fps, duration=args.duration, instance_idx=None, zoomed=True)
+            create_tracking_video(trajectory_data_mean, filters_order, args.dist, output_path_mean_zoomed,
+                                fps=args.fps, duration=args.duration, instance_idx=None, zoomed=True, output_format=args.format)
             
             print(f"Normal mean trajectory video saved to: {output_path_mean}")
             print(f"Zoomed mean trajectory video saved to: {output_path_mean_zoomed}")
@@ -747,24 +753,24 @@ def main():
             
             if len(trajectory_data_single) > 0:
                 if args.output is None:
-                    output_filename_single = f"tracking_video_INSTANCE_{instance_idx+1}_{args.dist}_fps{args.fps}.gif"
-                    output_filename_single_zoomed = f"tracking_video_INSTANCE_{instance_idx+1}_ZOOMED_{args.dist}_fps{args.fps}.gif"
+                    output_filename_single = f"tracking_video_INSTANCE_{instance_idx+1}_{args.dist}_fps{args.fps}.{args.format}"
+                    output_filename_single_zoomed = f"tracking_video_INSTANCE_{instance_idx+1}_ZOOMED_{args.dist}_fps{args.fps}.{args.format}"
                 else:
                     output_filename_single = f"INSTANCE_{instance_idx+1}_{args.output}"
                     output_filename_single_zoomed = f"INSTANCE_{instance_idx+1}_ZOOMED_{args.output}"
-                
+
                 output_path_single = os.path.join(results_dir, output_filename_single)
                 output_path_single_zoomed = os.path.join(results_dir, output_filename_single_zoomed)
-                
+
                 # Create normal single instance video
                 print(f"Creating normal view for instance #{instance_idx+1}...")
-                create_tracking_video(trajectory_data_single, filters_order, args.dist, output_path_single, 
-                                    fps=args.fps, duration=args.duration, instance_idx=instance_idx, zoomed=False)
-                
+                create_tracking_video(trajectory_data_single, filters_order, args.dist, output_path_single,
+                                    fps=args.fps, duration=args.duration, instance_idx=instance_idx, zoomed=False, output_format=args.format)
+
                 # Create zoomed single instance video
                 print(f"Creating zoomed view for instance #{instance_idx+1}...")
-                create_tracking_video(trajectory_data_single, filters_order, args.dist, output_path_single_zoomed, 
-                                    fps=args.fps, duration=args.duration, instance_idx=instance_idx, zoomed=True)
+                create_tracking_video(trajectory_data_single, filters_order, args.dist, output_path_single_zoomed,
+                                    fps=args.fps, duration=args.duration, instance_idx=instance_idx, zoomed=True, output_format=args.format)
                 
                 print(f"Instance #{instance_idx+1} normal video saved to: {output_path_single}")
                 print(f"Instance #{instance_idx+1} zoomed video saved to: {output_path_single_zoomed}")

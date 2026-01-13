@@ -12,7 +12,7 @@ from joblib import Parallel, delayed
 from estimator.EKF import EKF
 from estimator.DR_EKF_CDC import DR_EKF_CDC
 from estimator.DR_EKF_TAC import DR_EKF_TAC
-from common_utils import save_data, enforce_positive_definiteness
+from common_utils import save_data, enforce_positive_definiteness, estimate_nominal_parameters_EM, wrap_angle
 from estimator.base_filter import BaseFilter
 
 # Helper for sampling functions
@@ -368,10 +368,6 @@ def estimate_nominal_parameters(true_x0_mean, true_x0_cov, true_mu_w, true_Sigma
     return (nominal_x0_mean, nominal_x0_cov, nominal_mu_w, nominal_Sigma_w, 
             nominal_mu_v, nominal_Sigma_v)
 
-def wrap_angle(a):
-    """Wrap angle to (-pi, pi]. Works with scalars or 1x1 arrays."""
-    return np.arctan2(np.sin(a), np.cos(a))
-
 def wrap_angle_innovation(innovation):
     """Wrap angle innovations to (-pi, pi]. For use in filter updates with 3D radar."""
     wrapped_innovation = innovation.copy()
@@ -608,195 +604,6 @@ def _ekf_filter_single(
 
     return m_pred, P_pred, m_filt, P_filt, F_list
 
-
-def _rts_smoother_single(m_pred, P_pred, m_filt, P_filt, F_list):
-    """
-    Extended RTS smoother (uses stored Jacobians F_list).
-    Returns:
-      m_smooth, P_smooth
-    """
-    T = len(F_list)
-    nx = m_filt.shape[1]
-    m_smooth = m_filt.copy()
-    P_smooth = P_filt.copy()
-
-    for t in range(T-1, -1, -1):
-        Ft = F_list[t]
-        # smoother gain
-        Ppred_next = P_pred[t+1]
-        Ppred_next = 0.5 * (Ppred_next + Ppred_next.T)
-        Gt = P_filt[t] @ Ft.T @ np.linalg.solve(Ppred_next, np.eye(nx))
-
-        m_smooth[t] = m_filt[t] + Gt @ (m_smooth[t+1] - m_pred[t+1])
-        P_smooth[t] = P_filt[t] + Gt @ (P_smooth[t+1] - P_pred[t+1]) @ Gt.T
-        P_smooth[t] = 0.5 * (P_smooth[t] + P_smooth[t].T)
-
-    return m_smooth, P_smooth
-
-
-def estimate_nominal_parameters_EM(
-    u_data, y_data, dt,
-    x0_mean_init, x0_cov_init,
-    mu_w_init=None, Sigma_w_init=None,
-    mu_v_init=None, Sigma_v_init=None,
-    f=ct_dynamics,
-    F_jac=ct_jacobian,
-    h=radar_observation_function,
-    H_jac=radar_observation_jacobian,
-    max_iters=10,
-    tol=1e-4,
-    estimate_means=False,
-    estimate_x0=False,
-    cov_structure="diag",      # "full" | "diag" | "scalar"
-    reg=1e-6,
-    verbose=True,
-    rho_min=1e-2, angle_inflate=1e10
-):
-    """
-    EM-like nominal parameter estimation from input-output data for CT model.
-
-    Inputs:
-      u_data: (N, T, 2, 1) or (T, 2, 1)
-      y_data: (N, T+1, 3, 1) or (T+1, 3, 1)
-
-    Returns tuple:
-      (nominal_x0_mean, nominal_x0_cov, nominal_mu_w, nominal_Sigma_w, nominal_mu_v, nominal_Sigma_v)
-    """
-    # Normalize shapes to (N, ...)
-    if u_data.ndim == 3:  # (T,2,1)
-        u_data = u_data[None, ...]
-    if y_data.ndim == 3:  # (T+1,3,1)
-        y_data = y_data[None, ...]
-
-    N = u_data.shape[0]
-    T = u_data.shape[1]
-    nx = x0_mean_init.shape[0]
-    ny = y_data.shape[2]
-
-    x0_mean = x0_mean_init.copy()
-    x0_cov = x0_cov_init.copy()
-
-    mu_w = np.zeros((nx, 1)) if mu_w_init is None else mu_w_init.copy()
-    Q = 0.1 * np.eye(nx) if Sigma_w_init is None else Sigma_w_init.copy()
-
-    mu_v = np.zeros((ny, 1)) if mu_v_init is None else mu_v_init.copy()
-    R = 0.1 * np.eye(ny) if Sigma_v_init is None else Sigma_v_init.copy()
-
-    # enforce SPD at start
-    x0_cov = enforce_positive_definiteness(x0_cov)
-    Q = enforce_positive_definiteness(Q)
-    R = enforce_positive_definiteness(R)
-
-    def _apply_structure(S):
-        if cov_structure == "full":
-            return S
-        if cov_structure == "diag":
-            return np.diag(np.diag(S))
-        if cov_structure == "scalar":
-            s = float(np.trace(S) / S.shape[0])
-            return s * np.eye(S.shape[0])
-        raise ValueError(f"Unknown cov_structure={cov_structure}")
-
-    prev_obj = None
-    for it in range(max_iters):
-        # Accumulators for M-step
-        w_res_list = []
-        v_res_list = []
-        x0_list = []
-        x0_cov_list = []
-
-        # E-step: smooth each rollout
-        for k in range(N):
-            y_seq = y_data[k]
-            u_seq = u_data[k]
-
-            m_pred, P_pred, m_filt, P_filt, F_list = _ekf_filter_single(
-                y_seq, u_seq, dt,
-                x0_mean, x0_cov,
-                mu_w, Q,
-                mu_v, R,
-                f, F_jac, h, H_jac,
-                rho_min=rho_min, angle_inflate=angle_inflate, sensor_pos=(0, 0, 0)
-            )
-            m_smooth, P_smooth = _rts_smoother_single(m_pred, P_pred, m_filt, P_filt, F_list)
-            # No angle wrapping needed for CT state (no theta component)
-
-            if estimate_x0:
-                x0_list.append(m_smooth[0])
-                x0_cov_list.append(P_smooth[0])
-
-            # residuals
-            for t in range(T):
-                # w_t approx
-                w_hat = m_smooth[t+1] - f(m_smooth[t], u_seq[t], dt)
-                w_res_list.append(w_hat)
-
-            for t in range(T+1):
-                v_hat = y_seq[t] - h(m_smooth[t])
-                # Wrap bearing component of measurement residual
-                v_hat = wrap_angle_innovation(v_hat)
-                v_res_list.append(v_hat)
-
-        # Stack residuals: shape (dim, count)
-        W = np.hstack(w_res_list)  # (nx, N*T)
-        V = np.hstack(v_res_list)  # (ny, N*(T+1))
-
-        # M-step: means
-        if estimate_means:
-            mu_w_new = np.mean(W, axis=1, keepdims=True)
-            mu_v_new = np.mean(V, axis=1, keepdims=True)
-        else:
-            mu_w_new = mu_w
-            mu_v_new = mu_v
-
-        # M-step: covariances (moment-matching)
-        Wc = W - mu_w_new
-        Vc = V - mu_v_new
-
-        Q_new = (Wc @ Wc.T) / max(Wc.shape[1], 1)
-        R_new = (Vc @ Vc.T) / max(Vc.shape[1], 1)
-
-        # Regularize + structure + SPD
-        Q_new = _apply_structure(Q_new) + reg * np.eye(nx)
-        R_new = _apply_structure(R_new) + reg * np.eye(ny)
-
-        Q_new = enforce_positive_definiteness(Q_new)
-        R_new = enforce_positive_definiteness(R_new)
-
-        # x0 updates
-        if estimate_x0 and len(x0_list) > 0:
-            X0 = np.hstack(x0_list)  # (nx, N)
-            x0_mean_new = np.mean(X0, axis=1, keepdims=True)
-            # include smoother covariance at t=0
-            P0_bar = sum(x0_cov_list) / len(x0_cov_list)
-            centered = X0 - x0_mean_new
-            x0_cov_new = P0_bar + (centered @ centered.T) / max(centered.shape[1], 1)
-            x0_cov_new = _apply_structure(x0_cov_new) + reg * np.eye(nx)
-            x0_cov_new = enforce_positive_definiteness(x0_cov_new)
-        else:
-            x0_mean_new = x0_mean
-            x0_cov_new = x0_cov
-
-        # Convergence check (relative change)
-        dQ = np.linalg.norm(Q_new - Q, ord="fro") / (np.linalg.norm(Q, ord="fro") + 1e-12)
-        dR = np.linalg.norm(R_new - R, ord="fro") / (np.linalg.norm(R, ord="fro") + 1e-12)
-        dx0 = np.linalg.norm(x0_mean_new - x0_mean) / (np.linalg.norm(x0_mean) + 1e-12)
-
-        if verbose:
-            print(f"[EM] iter={it:02d}  rel_change: dQ={dQ:.3e}, dR={dR:.3e}, dx0={dx0:.3e}")
-
-        # Update params
-        mu_w, Q = mu_w_new, Q_new
-        mu_v, R = mu_v_new, R_new
-        x0_mean, x0_cov = x0_mean_new, x0_cov_new
-
-        if max(dQ, dR, dx0) < tol:
-            if verbose:
-                print(f"[EM] Converged at iter={it} (tol={tol}).")
-            break
-
-    return x0_mean, x0_cov, mu_w, Q, mu_v, R
-
 def run_experiment(exp_idx, dist, num_sim, seed_base, robust_val, filters_to_execute, T_steps, 
                   nominal_params, true_params, num_samples=100):
     """Run single experiment comparing filters"""
@@ -974,26 +781,30 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100,
         
         v_max = v_min = w_max = w_min = x0_max = x0_min = None
         x0_scale = w_scale = v_scale = None
-    else:  # U-quadratic (match Gaussian covariance / scale)
+    else:  # U-quadratic (independent definition)
         # For U-quadratic with support [min,max], Var = (3/20)*(max-min)^2.
-        # If symmetric bounds ±A, Var = (3/5)*A^2.
-        # To match Gaussian std sigma: A = sqrt(5/3)*sigma.
+        # Mean = (max + min) / 2
 
-        # --- bounds for U-quadratic ---
-        w_max = np.sqrt(5.0 / 3.0) * np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.02])
+        # --- Initial state bounds for U-quadratic ---
+        # State: [px, py, pz, vx, vy, vz, omega]
+        x0_max = np.array([0.5, 0.5, 0.5, 2.5, 0.5, 0.5, 0.15])
+        x0_min = np.array([-0.5, -0.5, -0.5, 1.5, -0.5, -0.5, 0.05])
+        x0_mean = (0.5 * (x0_max + x0_min)).reshape(-1, 1)
+        x0_cov = 3.0/20.0 * np.diag((x0_max - x0_min)**2)
+
+        # --- Process noise bounds for U-quadratic ---
+        # [px, py, pz, vx, vy, vz, omega]
+        w_max = np.array([0.02, 0.02, 0.02, 0.05, 0.05, 0.1, 0.02])
         w_min = -w_max
         mu_w = np.zeros((nx, 1))
-        Sigma_w = 3.0/20.0 * np.diag((w_max - w_min)**2)          # == diag(std_w**2)
+        Sigma_w = 3.0/20.0 * np.diag((w_max - w_min)**2)
 
-        v_max = np.sqrt(5.0 / 3.0) * np.array([0.01, np.deg2rad(0.1), np.deg2rad(0.1)])  
+        # --- Measurement noise bounds for U-quadratic ---
+        # [range, azimuth, elevation]
+        v_max = np.array([0.02, np.deg2rad(0.1), np.deg2rad(0.1)])
         v_min = -v_max
         mu_v = np.zeros((ny, 1))
-        Sigma_v = 3.0/20.0 * np.diag((v_max - v_min)**2)          # == diag(std_v**2)
-
-        # initial uncertainty: use same scale as Gaussian x0_cov
-        x0_max = np.sqrt(5.0 / 3.0) * np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.05])        
-        x0_min = -x0_max
-        x0_cov = 3.0/20.0 * np.diag((x0_max - x0_min)**2)         # == diag(std_x0**2)
+        Sigma_v = 3.0/20.0 * np.diag((v_max - v_min)**2)
 
         x0_scale = w_scale = v_scale = None
     
@@ -1027,7 +838,8 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100,
         seed=seed_base + 999999
     )
 
-    # 2) EM estimation (Gaussian nominal approximation)
+    # 2) EM estimation (Gaussian nominal approximation) using unified EM from common_utils
+    # Use custom filter function with angle gating for 3D radar measurements
     nominal_params = estimate_nominal_parameters_EM(
         u_data=u_data,
         y_data=y_data,
@@ -1045,12 +857,16 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100,
         max_iters=50,
         tol=1e-4,
         estimate_means=False,
-        estimate_x0=False,
-        cov_structure="diag",                 # strong recommendation for identifiability
+        estimate_x0=False,  # Estimate initial state mean and covariance
+        cov_structure="full",                 
         reg=1e-6,
         verbose=True,
-        rho_min=rho_min,
-        angle_inflate=angle_inflate
+        wrap_innovation_fn=None,              # Innovation wrapping handled by custom filter
+        wrap_measurement_residual_fn=wrap_angle_innovation,  # Wrap azimuth and elevation in residuals
+        wrap_process_residual_fn=None,        # No process residual wrapping needed
+        wrap_smoothed_state_fn=None,          # No smoothed state wrapping needed
+        custom_filter_fn=_ekf_filter_single,  # Use custom filter with angle gating
+        custom_filter_kwargs={'rho_min': rho_min, 'angle_inflate': angle_inflate, 'sensor_pos': (0, 0, 0)}
     )
     
     
@@ -1171,11 +987,11 @@ if __name__ == "__main__":
                         help="Number of simulation runs per experiment")
     parser.add_argument('--num_exp', default=10, type=int,
                         help="Number of independent experiments")
-    parser.add_argument('--T_total', default=40.0, type=float,
+    parser.add_argument('--T_total', default=50.0, type=float,
                         help="Total simulation time")
     parser.add_argument('--T_em', default=10.0, type=float,
                         help="Horizon length for EM data generation")
-    parser.add_argument('--num_samples', default=100, type=int,
+    parser.add_argument('--num_samples', default=50, type=int,
                         help="Number of samples for nominal parameter estimation")
     parser.add_argument('--rho_min', default=1e-2, type=float,
                         help="Minimum horizontal range for angle measurements (angle gating threshold)")

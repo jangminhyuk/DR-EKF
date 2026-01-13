@@ -212,8 +212,12 @@ def compute_heading_from_velocity(vx, vy):
     """Compute heading angle from velocity components."""
     return np.arctan2(vy, vx)
 
-def create_tracking_video(trajectory_data, filters_order, dist, output_filename, fps=10, duration=None, instance_idx=None):
-    """Create animated video showing tracking with airplane for true state and markers for estimates."""
+def create_tracking_video(trajectory_data, filters_order, dist, output_filename, fps=10, duration=None, instance_idx=None, output_format='gif'):
+    """Create animated video showing tracking with airplane for true state and markers for estimates.
+
+    Args:
+        output_format: Output format ('gif' or 'mp4')
+    """
     
     # Colors and markers for filters
     colors = {
@@ -251,49 +255,45 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
     x_min, x_max = np.min(np.concatenate(all_x)), np.max(np.concatenate(all_x))
     y_min, y_max = np.min(np.concatenate(all_y)), np.max(np.concatenate(all_y))
     
-    # Calculate optimal figure size based on data aspect ratio
+    # Calculate data aspect ratio
     x_range = x_max - x_min
     y_range = y_max - y_min
     data_aspect_ratio = x_range / y_range if y_range > 0 else 1.0
-    
-    # Base figure size
-    base_height = 12
-    base_width = 16
-    
-    # Adjust figure size to match data aspect ratio while keeping area similar
-    if data_aspect_ratio > (base_width / base_height):  # Wide data
-        # Keep width, adjust height
-        fig_width = base_width
-        fig_height = base_width / data_aspect_ratio
-        # Ensure minimum height
-        fig_height = max(fig_height, 8)
-    else:  # Tall data
-        # Keep height, adjust width  
-        fig_height = base_height
-        fig_width = base_height * data_aspect_ratio
-        # Ensure minimum width
-        fig_width = max(fig_width, 10)
-    
-    # Set up the figure and axis with dynamic size
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    plt.tight_layout()
-    
-    # Add minimal margins for tighter layout
-    x_margin = (x_max - x_min) * 0.05
-    y_margin = (y_max - y_min) * 0.05
-    
-    ax.set_xlim(x_min - x_margin, x_max + x_margin)
-    ax.set_ylim(y_min - y_margin, y_max + y_margin)
-    # Use 'auto' aspect ratio instead of 'equal' to fill the figure
-    ax.set_aspect('auto')
+
+    # Use fixed square figure size
+    fig_size = 16
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+
+    # Add padding to make the plot area square while preserving data aspect ratio
+    base_margin = 0.05
+    if data_aspect_ratio > 1.0:  # Data is wider than tall
+        # Add more vertical padding
+        x_margin = x_range * base_margin
+        y_margin = y_range * base_margin
+        # Expand y limits to match aspect ratio
+        y_center = (y_min + y_max) / 2
+        y_range_needed = x_range  # To make it square
+        ax.set_xlim(x_min - x_margin, x_max + x_margin)
+        ax.set_ylim(y_center - y_range_needed/2 - y_margin, y_center + y_range_needed/2 + y_margin)
+    else:  # Data is taller than wide (or square)
+        # Add more horizontal padding
+        x_margin = x_range * base_margin
+        y_margin = y_range * base_margin
+        # Expand x limits to match aspect ratio
+        x_center = (x_min + x_max) / 2
+        x_range_needed = y_range  # To make it square
+        ax.set_xlim(x_center - x_range_needed/2 - x_margin, x_center + x_range_needed/2 + x_margin)
+        ax.set_ylim(y_min - y_margin, y_max + y_margin)
+
+    # Use equal aspect ratio for square appearance
+    ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
     # Increase tick label sizes
-    ax.tick_params(axis='both', which='major', labelsize=20)
-    ax.set_xlabel('X position', fontsize=32)
-    ax.set_ylabel('Y position', fontsize=32)
-    # Set title based on distribution type
-    dist_name = 'Target Tracking (Gaussian Noise)' if dist == 'normal' else 'Target Tracking (U-Quadratic Noise)'
-    ax.set_title(dist_name, fontsize=36, pad=30)
+    ax.tick_params(axis='both', which='major', labelsize=28)
+    ax.set_xlabel('X position', fontsize=42)
+    ax.set_ylabel('Y position', fontsize=42)
+
+    # No title - time will be displayed in title position
     
     # Initialize trajectory lines and current position markers
     trajectory_lines = {}
@@ -304,32 +304,33 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
     for filt in filters_order:
         if filt in trajectory_data:
             # Estimated trajectory line (will be updated each frame)
-            line, = ax.plot([], [], '-', color=colors[filt], linewidth=2, alpha=0.7, 
+            line, = ax.plot([], [], '-', color=colors[filt], linewidth=4, alpha=0.7,
                            label=filter_names[filt])
             trajectory_lines[filt] = line
-            
+
             # Current position marker - put it in front of airplane
-            marker, = ax.plot([], [], markers[filt], color=colors[filt], markersize=8, 
-                             markeredgecolor='black', markeredgewidth=1, zorder=10)
+            marker, = ax.plot([], [], markers[filt], color=colors[filt], markersize=16,
+                             markeredgecolor='black', markeredgewidth=2, zorder=10)
             current_markers[filt] = marker
-    
+
     # True trajectory line (will be updated each frame)
-    true_line, = ax.plot([], [], ':', color='black', linewidth=2, alpha=0.8, label='True Trajectory')
+    true_line, = ax.plot([], [], ':', color='black', linewidth=4, alpha=0.8, label='True Trajectory')
     
     # Create legend with larger font
     legend_handles = [true_line] + [trajectory_lines[filt] for filt in filters_order if filt in trajectory_data]
-    ax.legend(handles=legend_handles, loc='upper right', fontsize=24)
-    
-    # Add time display and mode label with larger fonts
-    time_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, fontsize=24,
-                       verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-    
+    ax.legend(handles=legend_handles, loc='upper right', fontsize=32)
+
+    # Add time display above the instance/mean indicator on the left
+    time_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, fontsize=44,
+                       horizontalalignment='left', verticalalignment='top',
+                       weight='bold', color='black')
+
     if instance_idx is not None:
-        mode_label = ax.text(0.02, 0.90, f'INSTANCE #{instance_idx+1}', transform=ax.transAxes, fontsize=28,
+        mode_label = ax.text(0.02, 0.90, f'INSTANCE #{instance_idx+1}', transform=ax.transAxes, fontsize=36,
                             weight='bold', color='darkgreen', verticalalignment='top',
                             bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
     else:
-        mode_label = ax.text(0.02, 0.90, 'MEAN TRAJECTORIES', transform=ax.transAxes, fontsize=28,
+        mode_label = ax.text(0.02, 0.90, 'MEAN TRAJECTORIES', transform=ax.transAxes, fontsize=36,
                             weight='bold', color='darkblue', verticalalignment='top',
                             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
     
@@ -378,11 +379,11 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
             airplane_symbol = '✈'  # Unicode airplane symbol
             # Convert heading to degrees for rotation
             heading_deg = np.degrees(heading)
-            
+
             # Create text airplane with rotation - make it bigger and black, put it behind markers
-            airplane_text = ax.text(true_pos_x, true_pos_y, airplane_symbol, 
-                                  fontsize=60, ha='center', va='center',
-                                  rotation=heading_deg, color='black', 
+            airplane_text = ax.text(true_pos_x, true_pos_y, airplane_symbol,
+                                  fontsize=80, ha='center', va='center',
+                                  rotation=heading_deg, color='black',
                                   weight='bold', zorder=5)
         
         # Update estimated trajectories and current positions
@@ -422,14 +423,17 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
     anim = animation.FuncAnimation(fig, animate, init_func=init, frames=frames, 
                                  interval=1000/fps, blit=True, repeat=True)
     
-    # Adjust layout to minimize whitespace
-    plt.subplots_adjust(left=0.08, bottom=0.08, right=0.95, top=0.92)
-    
+    # Adjust layout to ensure labels aren't trimmed with larger fonts
+    plt.subplots_adjust(left=0.14, bottom=0.11, right=0.96, top=0.93)
+
     # Save animation with higher DPI for better quality
     print(f"Saving video to: {output_filename}")
-    anim.save(output_filename, writer='pillow', fps=fps, dpi=120)
+    if output_format == 'mp4':
+        anim.save(output_filename, writer='ffmpeg', fps=fps, dpi=120)
+    else:  # gif
+        anim.save(output_filename, writer='pillow', fps=fps, dpi=120)
     plt.close(fig)
-    
+
     print(f"Video saved successfully!")
     return output_filename
 
@@ -441,8 +445,10 @@ def main():
                         help='Frames per second for video')
     parser.add_argument('--duration', type=float,
                         help='Duration in seconds (if not specified, uses full trajectory)')
-    parser.add_argument('--output', 
+    parser.add_argument('--output',
                         help='Output filename (if not specified, auto-generated)')
+    parser.add_argument('--format', default='gif', choices=['gif', 'mp4'],
+                        help='Output video format (default: gif)')
     args = parser.parse_args()
     
     try:
@@ -467,15 +473,15 @@ def main():
         
         if len(trajectory_data_mean) > 0:
             if args.output is None:
-                output_filename_mean = f"tracking_video_MEAN_{args.dist}_fps{args.fps}.gif"
+                output_filename_mean = f"tracking_video_MEAN_{args.dist}_fps{args.fps}.{args.format}"
             else:
                 output_filename_mean = f"MEAN_{args.output}"
-            
+
             output_path_mean = os.path.join(results_dir, output_filename_mean)
-            
+
             # Create mean video
-            create_tracking_video(trajectory_data_mean, filters_order, args.dist, output_path_mean, 
-                                fps=args.fps, duration=args.duration, instance_idx=None)
+            create_tracking_video(trajectory_data_mean, filters_order, args.dist, output_path_mean,
+                                fps=args.fps, duration=args.duration, instance_idx=None, output_format=args.format)
             
             print(f"Mean trajectory video saved to: {output_path_mean}")
         else:
@@ -509,15 +515,15 @@ def main():
             
             if len(trajectory_data_single) > 0:
                 if args.output is None:
-                    output_filename_single = f"tracking_video_INSTANCE_{instance_idx+1}_{args.dist}_fps{args.fps}.gif"
+                    output_filename_single = f"tracking_video_INSTANCE_{instance_idx+1}_{args.dist}_fps{args.fps}.{args.format}"
                 else:
                     output_filename_single = f"INSTANCE_{instance_idx+1}_{args.output}"
-                
+
                 output_path_single = os.path.join(results_dir, output_filename_single)
-                
+
                 # Create single instance video
-                create_tracking_video(trajectory_data_single, filters_order, args.dist, output_path_single, 
-                                    fps=args.fps, duration=args.duration, instance_idx=instance_idx)
+                create_tracking_video(trajectory_data_single, filters_order, args.dist, output_path_single,
+                                    fps=args.fps, duration=args.duration, instance_idx=instance_idx, output_format=args.format)
                 
                 print(f"Instance #{instance_idx+1} video saved to: {output_path_single}")
                 single_videos_created += 1

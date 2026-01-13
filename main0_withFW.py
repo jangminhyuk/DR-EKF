@@ -12,7 +12,7 @@ from joblib import Parallel, delayed
 from estimator.EKF import EKF
 from estimator.DR_EKF_CDC import DR_EKF_CDC
 from estimator.DR_EKF_TAC import DR_EKF_TAC
-from common_utils import save_data, enforce_positive_definiteness
+from common_utils import save_data, enforce_positive_definiteness, estimate_nominal_parameters_EM
 from estimator.base_filter import BaseFilter
 
 # Helper for sampling functions
@@ -365,297 +365,6 @@ def generate_io_dataset_unicycle(reference_traj, dt, num_rollouts, dist,
     
     return u_data, y_data
 
-def estimate_nominal_parameters_EM(
-    u_data, y_data, dt,
-    x0_mean_init, x0_cov_init,
-    mu_w_init=None, Sigma_w_init=None,
-    mu_v_init=None, Sigma_v_init=None,
-    f=unicycle_dynamics,
-    F_jac=unicycle_jacobian,
-    h=observation_function,
-    H_jac=observation_jacobian,
-    max_iters=50,
-    tol=1e-4,
-    estimate_means=False,
-    estimate_x0=False,
-    cov_structure="diag",      # "full" | "diag" | "scalar"
-    reg=1e-6,
-    verbose=True
-):
-    """
-    EM-like nominal parameter estimation from input-output data for unicycle model.
-    """
-    # Normalize shapes to (N, ...)
-    if u_data[0].ndim == 3:  # List of (T,2,1)
-        # Convert list to array format compatible with CT implementation
-        u_data = [u.squeeze(-1) for u in u_data]  # Convert to (T,2)
-        y_data = [y.squeeze(-1) for y in y_data]  # Convert to (T+1,2)
-    
-    N = len(u_data)
-    T = u_data[0].shape[0] if N > 0 else 0
-    nx = x0_mean_init.shape[0]
-    ny = y_data[0].shape[1] if N > 0 else 2
-    
-    x0_mean = x0_mean_init.copy()
-    x0_cov = x0_cov_init.copy()
-    
-    mu_w = np.zeros((nx, 1)) if mu_w_init is None else mu_w_init.copy()
-    Q = 0.1 * np.eye(nx) if Sigma_w_init is None else Sigma_w_init.copy()
-    
-    mu_v = np.zeros((ny, 1)) if mu_v_init is None else mu_v_init.copy()
-    R = 0.1 * np.eye(ny) if Sigma_v_init is None else Sigma_v_init.copy()
-    
-    # enforce SPD at start
-    x0_cov = enforce_positive_definiteness(x0_cov)
-    Q = enforce_positive_definiteness(Q)
-    R = enforce_positive_definiteness(R)
-    
-    def _apply_structure(S):
-        if cov_structure == "full":
-            return S
-        if cov_structure == "diag":
-            return np.diag(np.diag(S))
-        if cov_structure == "scalar":
-            s = float(np.trace(S) / S.shape[0])
-            return s * np.eye(S.shape[0])
-        raise ValueError(f"Unknown cov_structure={cov_structure}")
-    
-    for it in range(max_iters):
-        # Accumulators for M-step
-        w_res_list = []
-        v_res_list = []
-        x0_list = []
-        x0_cov_list = []
-        
-        # E-step: smooth each rollout
-        for k in range(N):
-            y_seq = y_data[k]  # (T+1, 2)
-            u_seq = u_data[k]  # (T, 2)
-            
-            # Convert back to expected format for filtering
-            y_seq_expanded = y_seq[:, :, np.newaxis]  # (T+1, 2, 1)
-            u_seq_expanded = u_seq[:, :, np.newaxis]  # (T, 2, 1)
-            
-            # Simple EKF filtering and RTS smoothing
-            m_smooth, P_smooth = _simple_ekf_smooth(
-                y_seq_expanded, u_seq_expanded, dt,
-                x0_mean, x0_cov, mu_w, Q, mu_v, R,
-                f, F_jac, h, H_jac
-            )
-            
-            if estimate_x0:
-                x0_list.append(m_smooth[0])
-                x0_cov_list.append(P_smooth[0])
-            
-            # residuals
-            for t in range(T):
-                # w_t approximation
-                w_hat = m_smooth[t+1] - f(m_smooth[t], u_seq_expanded[t], dt)
-                w_res_list.append(w_hat)
-            
-            for t in range(T+1):
-                v_hat = y_seq_expanded[t] - h(m_smooth[t])
-                v_res_list.append(v_hat)
-        
-        # Stack residuals
-        W = np.hstack(w_res_list)  # (nx, N*T)
-        V = np.hstack(v_res_list)  # (ny, N*(T+1))
-        
-        # M-step: means
-        if estimate_means:
-            mu_w_new = np.mean(W, axis=1, keepdims=True)
-            mu_v_new = np.mean(V, axis=1, keepdims=True)
-        else:
-            mu_w_new = mu_w
-            mu_v_new = mu_v
-        
-        # M-step: covariances (moment-matching)
-        Wc = W - mu_w_new
-        Vc = V - mu_v_new
-        
-        Q_new = (Wc @ Wc.T) / max(Wc.shape[1], 1)
-        R_new = (Vc @ Vc.T) / max(Vc.shape[1], 1)
-        
-        # Regularize + structure + SPD
-        Q_new = _apply_structure(Q_new) + reg * np.eye(nx)
-        R_new = _apply_structure(R_new) + reg * np.eye(ny)
-        
-        Q_new = enforce_positive_definiteness(Q_new)
-        R_new = enforce_positive_definiteness(R_new)
-        
-        # x0 updates
-        if estimate_x0 and len(x0_list) > 0:
-            X0 = np.hstack(x0_list)  # (nx, N)
-            x0_mean_new = np.mean(X0, axis=1, keepdims=True)
-            # include smoother covariance at t=0
-            P0_bar = sum(x0_cov_list) / len(x0_cov_list)
-            centered = X0 - x0_mean_new
-            x0_cov_new = P0_bar + (centered @ centered.T) / max(centered.shape[1], 1)
-            x0_cov_new = _apply_structure(x0_cov_new) + reg * np.eye(nx)
-            x0_cov_new = enforce_positive_definiteness(x0_cov_new)
-        else:
-            x0_mean_new = x0_mean
-            x0_cov_new = x0_cov
-        
-        # Convergence check (relative change)
-        dQ = np.linalg.norm(Q_new - Q, ord="fro") / (np.linalg.norm(Q, ord="fro") + 1e-12)
-        dR = np.linalg.norm(R_new - R, ord="fro") / (np.linalg.norm(R, ord="fro") + 1e-12)
-        dx0 = np.linalg.norm(x0_mean_new - x0_mean) / (np.linalg.norm(x0_mean) + 1e-12)
-        
-        if verbose:
-            print(f"[EM] iter={it:02d}  rel_change: dQ={dQ:.3e}, dR={dR:.3e}, dx0={dx0:.3e}")
-        
-        # Update params
-        mu_w, Q = mu_w_new, Q_new
-        mu_v, R = mu_v_new, R_new
-        x0_mean, x0_cov = x0_mean_new, x0_cov_new
-        
-        # Convergence test
-        if max(dQ, dR, dx0) < tol:
-            if verbose:
-                print(f"[EM] Converged at iteration {it+1}")
-            break
-    
-    return (x0_mean, x0_cov, mu_w, Q, mu_v, R)
-
-def _simple_ekf_smooth(y_seq, u_seq, dt, x0_mean, x0_cov, mu_w, Q, mu_v, R, f, F_jac, h, H_jac):
-    """Simple EKF filtering and RTS smoothing for unicycle dynamics"""
-    T = u_seq.shape[0]
-    nx = x0_mean.shape[0]
-    
-    # Forward pass (filtering)
-    m_filt = np.zeros((T+1, nx, 1))
-    P_filt = np.zeros((T+1, nx, nx))
-    m_pred = np.zeros((T+1, nx, 1))
-    P_pred = np.zeros((T+1, nx, nx))
-    F_list = []
-    
-    # Initialize
-    m_filt[0] = x0_mean.copy()
-    P_filt[0] = x0_cov.copy()
-    
-    for t in range(T):
-        # Predict
-        F_t = F_jac(m_filt[t], u_seq[t], dt)
-        F_list.append(F_t)
-        
-        m_pred[t+1] = f(m_filt[t], u_seq[t], dt) + mu_w
-        P_pred[t+1] = F_t @ P_filt[t] @ F_t.T + Q
-        P_pred[t+1] = 0.5 * (P_pred[t+1] + P_pred[t+1].T)
-        
-        # Update
-        H_t = H_jac(m_pred[t+1])
-        y_pred = h(m_pred[t+1]) + mu_v
-        residual = y_seq[t+1] - y_pred
-        
-        S = H_t @ P_pred[t+1] @ H_t.T + R
-        S = 0.5 * (S + S.T)
-        
-        try:
-            K = P_pred[t+1] @ H_t.T @ np.linalg.inv(S)
-        except:
-            K = P_pred[t+1] @ H_t.T @ np.linalg.pinv(S)
-        
-        m_filt[t+1] = m_pred[t+1] + K @ residual
-        P_filt[t+1] = P_pred[t+1] - K @ H_t @ P_pred[t+1]
-        P_filt[t+1] = 0.5 * (P_filt[t+1] + P_filt[t+1].T)
-    
-    # Backward pass (smoothing)
-    m_smooth = m_filt.copy()
-    P_smooth = P_filt.copy()
-    
-    for t in range(T-1, -1, -1):
-        F_t = F_list[t]
-        try:
-            G_t = P_filt[t] @ F_t.T @ np.linalg.inv(P_pred[t+1])
-        except:
-            G_t = P_filt[t] @ F_t.T @ np.linalg.pinv(P_pred[t+1])
-        
-        m_smooth[t] = m_filt[t] + G_t @ (m_smooth[t+1] - m_pred[t+1])
-        P_smooth[t] = P_filt[t] + G_t @ (P_smooth[t+1] - P_pred[t+1]) @ G_t.T
-        P_smooth[t] = 0.5 * (P_smooth[t] + P_smooth[t].T)
-    
-    return m_smooth, P_smooth
-
-def _ekf_forward_pass(y_data, u_data, params, f, F_jac, h, H_jac, dt, wrap_theta_residual):
-    """
-    Extended Kalman Filter forward pass.
-    Returns:
-      m_pred, P_pred, m_filt, P_filt, F_list
-    """
-    T = u_data.shape[0]
-    nx = params['x0_mean'].shape[0]
-    ny = y_data.shape[1]
-    
-    # Storage
-    m_pred = np.zeros((T+1, nx, 1))
-    P_pred = np.zeros((T+1, nx, nx))
-    m_filt = np.zeros((T+1, nx, 1))
-    P_filt = np.zeros((T+1, nx, nx))
-    F_list = []
-    
-    # Initial condition
-    m_filt[0] = params['x0_mean']
-    P_filt[0] = params['x0_cov']
-    
-    for t in range(T):
-        # Predict step
-        Ft = F_jac(m_filt[t], u_data[t], dt)
-        F_list.append(Ft)
-        
-        m_pred[t+1] = f(m_filt[t], u_data[t], dt) + params['mu_w']
-        P_pred[t+1] = Ft @ P_filt[t] @ Ft.T + params['Sigma_w']
-        P_pred[t+1] = 0.5 * (P_pred[t+1] + P_pred[t+1].T)  # Ensure symmetry
-        
-        # Update step
-        Ht = H_jac(m_pred[t+1])
-        y_pred = h(m_pred[t+1]) + params['mu_v']
-        
-        residual = y_data[t+1] - y_pred
-        
-        S = Ht @ P_pred[t+1] @ Ht.T + params['Sigma_v']
-        S = 0.5 * (S + S.T)  # Ensure symmetry
-        
-        try:
-            K = P_pred[t+1] @ Ht.T @ np.linalg.inv(S)
-        except:
-            K = P_pred[t+1] @ Ht.T @ np.linalg.pinv(S)
-        
-        m_filt[t+1] = m_pred[t+1] + K @ residual
-        P_filt[t+1] = P_pred[t+1] - K @ Ht @ P_pred[t+1]
-        P_filt[t+1] = 0.5 * (P_filt[t+1] + P_filt[t+1].T)  # Ensure symmetry
-        
-        # Wrap theta angle if needed
-        if wrap_theta_residual and nx >= 3:
-            m_filt[t+1][2, 0] = wrap_angle(m_filt[t+1][2, 0])
-
-    return m_pred, P_pred, m_filt, P_filt, F_list
-
-
-def _rts_smoother_single(m_pred, P_pred, m_filt, P_filt, F_list):
-    """
-    Extended RTS smoother (uses stored Jacobians F_list).
-    Returns:
-      m_smooth, P_smooth
-    """
-    T = len(F_list)
-    nx = m_filt.shape[1]
-    m_smooth = m_filt.copy()
-    P_smooth = P_filt.copy()
-
-    for t in range(T-1, -1, -1):
-        Ft = F_list[t]
-        # smoother gain
-        Ppred_next = P_pred[t+1]
-        Ppred_next = 0.5 * (Ppred_next + Ppred_next.T)
-        Gt = P_filt[t] @ Ft.T @ np.linalg.solve(Ppred_next, np.eye(nx))
-        
-        # smooth
-        m_smooth[t] = m_filt[t] + Gt @ (m_smooth[t+1] - m_pred[t+1])
-        P_smooth[t] = P_filt[t] + Gt @ (P_smooth[t+1] - Ppred_next) @ Gt.T
-        P_smooth[t] = 0.5 * (P_smooth[t] + P_smooth[t].T)
-
-    return m_smooth, P_smooth
 
 def run_experiment(exp_idx, dist, num_sim, seed_base, robust_val, filters_to_execute, reference_traj, 
                   nominal_params, true_params, num_samples=100):
@@ -806,7 +515,7 @@ def main(dist, num_sim, num_exp, T_total=10.0, num_samples=100):
         
         # Measurement noise: position uncertainty  
         mu_v = np.zeros((ny, 1))
-        Sigma_v = 0.05 * np.eye(ny)
+        Sigma_v = 0.1 * np.eye(ny)
         
         # Distribution bounds (not used for normal)
         x0_max = x0_min = w_max = w_min = v_max = v_min = None
@@ -992,11 +701,11 @@ if __name__ == "__main__":
                         help="Uncertainty distribution (normal or quadratic)")
     parser.add_argument('--num_sim', default=1, type=int,
                         help="Number of simulation runs per experiment")
-    parser.add_argument('--num_exp', default=10, type=int,
+    parser.add_argument('--num_exp', default=20, type=int,
                         help="Number of independent experiments")
     parser.add_argument('--T_total', default=10.0, type=float,
                         help="Total simulation time")
-    parser.add_argument('--num_samples', default=10, type=int,
+    parser.add_argument('--num_samples', default=5, type=int,
                         help="Number of samples for nominal parameter estimation")
     args = parser.parse_args()
     main(args.dist, args.num_sim, args.num_exp, args.T_total, args.num_samples)

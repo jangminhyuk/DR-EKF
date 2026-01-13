@@ -428,54 +428,94 @@ def run_timing_experiment(dist='normal', T_total=10.0, num_samples=100, robust_v
         
         print(f"{filter_name:<15}: {avg_time_per_step*1000:.4f}±{std_time_per_step*1000:.4f} ms/step, {frequency_hz:.2f} Hz")
     
-    # Save results
-    results_path = "./results/timing_comparison_with_FW/"
-    if not os.path.exists(results_path):
-        os.makedirs(results_path)
-    
-    save_data(os.path.join(results_path, f'timing_results_{dist}_{robust_val}.pkl'), final_results)
-    
-    print(f"\nTiming results saved to {results_path}")
-    
+    # Don't save here - will save in main() for all theta values together
     return final_results
 
 def main():
     """Main timing comparison routine"""
-    
+
     # Configuration
     dist = 'normal'  # Can be changed to 'quadratic' for different noise distributions
-    T_total = 10.0   # 10 seconds simulation
+    T_total = 5.0   # 5 seconds simulation
     num_samples = 100
-    robust_val = 0.1  # Medium robustness parameter
-    num_trials = 10   # 10 trials as requested
-    
+    robust_vals = [0.01, 0.05, 0.1, 0.5, 1.0, 5.0]  # Test various theta values
+    num_trials = 10   # 10 trials per theta value
+
     print("EKF vs DR-EKF Computation Time Comparison")
     print("=" * 80)
     print(f"Configuration:")
     print(f"  Distribution: {dist}")
     print(f"  Simulation time: {T_total} seconds")
     print(f"  Time step: 0.2 seconds ({int(T_total/0.2)} steps)")
-    print(f"  Robustness parameter (θ): {robust_val}")
-    print(f"  Number of trials: {num_trials}")
+    print(f"  Robustness parameters (θ): {robust_vals}")
+    print(f"  Number of trials per θ: {num_trials}")
     print(f"  Nominal parameter samples: {num_samples}")
     print("=" * 80)
-    
-    # Run timing experiments
-    results = run_timing_experiment(dist, T_total, num_samples, robust_val, num_trials)
-    
-    # Print summary comparison
+
+    # Store results for all theta values
+    all_results = {}
+
+    # Run timing experiments for each theta value
+    for robust_val in robust_vals:
+        print("\n" + "=" * 80)
+        print(f"Testing θ = {robust_val}")
+        print("=" * 80)
+
+        # Run timing experiment for this theta value
+        results = run_timing_experiment(dist, T_total, num_samples, robust_val, num_trials)
+
+        # Store results
+        all_results[robust_val] = results
+
+        # Print summary comparison for this theta
+        print("\n" + "-" * 80)
+        print(f"SPEED COMPARISON SUMMARY (θ = {robust_val}):")
+        print("-" * 80)
+
+        ekf_time = results['EKF']['avg_time_per_step_ms']
+
+        for filter_name, data in results.items():
+            if filter_name != 'EKF':
+                speedup_factor = ekf_time / data['avg_time_per_step_ms']
+                print(f"{filter_name} is {speedup_factor:.2f}x {'faster' if speedup_factor > 1 else 'slower'} than EKF")
+
+        print("-" * 80)
+
+    # Save all results
+    results_path = "./results/timing_comparison_with_FW/"
+    if not os.path.exists(results_path):
+        os.makedirs(results_path)
+
+    # Save consolidated results for all theta values
+    save_data(os.path.join(results_path, f'timing_results_all_theta_{dist}.pkl'), all_results)
+
     print("\n" + "=" * 80)
-    print("SPEED COMPARISON SUMMARY:")
+    print("ALL TIMING RESULTS SAVED")
     print("=" * 80)
-    
-    ekf_time = results['EKF']['avg_time_per_step_ms']
-    
-    for filter_name, data in results.items():
-        if filter_name != 'EKF':
-            speedup_factor = ekf_time / data['avg_time_per_step_ms']
-            print(f"{filter_name} is {speedup_factor:.2f}x {'faster' if speedup_factor > 1 else 'slower'} than EKF")
-    
+    print(f"Results saved to: {results_path}timing_results_all_theta_{dist}.pkl")
+    print(f"Data structure: all_results[theta][filter_name] = timing statistics")
+    print(f"Theta values tested: {robust_vals}")
+    print(f"Filters tested: EKF, DR_EKF_CDC, DR_EKF_TAC, DR_EKF_CDC_FW")
     print("=" * 80)
+
+    # Print comprehensive summary table
+    print("\n" + "=" * 80)
+    print("COMPREHENSIVE TIMING SUMMARY (ms/step)")
+    print("=" * 80)
+    print(f"{'θ':<10} {'EKF':<15} {'DR_EKF_CDC':<15} {'DR_EKF_TAC':<15} {'DR_EKF_CDC_FW':<15}")
+    print("-" * 80)
+
+    for theta in robust_vals:
+        row = f"{theta:<10.2f}"
+        for filter_name in ['EKF', 'DR_EKF_CDC', 'DR_EKF_TAC', 'DR_EKF_CDC_FW']:
+            avg_time = all_results[theta][filter_name]['avg_time_per_step_ms']
+            std_time = all_results[theta][filter_name]['std_time_per_step_ms']
+            row += f" {avg_time:.4f}±{std_time:.4f}"
+        print(row)
+
+    print("=" * 80)
+
+    return all_results
 
 if __name__ == "__main__":
     main()

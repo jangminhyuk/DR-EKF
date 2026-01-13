@@ -12,7 +12,7 @@ from joblib import Parallel, delayed
 from estimator.EKF import EKF
 from estimator.DR_EKF_CDC import DR_EKF_CDC
 from estimator.DR_EKF_TAC import DR_EKF_TAC
-from common_utils import save_data, enforce_positive_definiteness
+from common_utils import save_data, enforce_positive_definiteness, estimate_nominal_parameters_EM, wrap_angle
 from estimator.base_filter import BaseFilter
 
 # Helper for sampling functions
@@ -280,10 +280,6 @@ def estimate_nominal_parameters(true_x0_mean, true_x0_cov, true_mu_w, true_Sigma
     return (nominal_x0_mean, nominal_x0_cov, nominal_mu_w, nominal_Sigma_w, 
             nominal_mu_v, nominal_Sigma_v)
 
-def wrap_angle(a):
-    """Wrap angle to (-pi, pi]. Works with scalars or 1x1 arrays."""
-    return np.arctan2(np.sin(a), np.cos(a))
-
 def wrap_bearing_innovation(innovation):
     """Wrap bearing innovations to (-pi, pi]. For use in filter updates."""
     wrapped_innovation = innovation.copy()
@@ -419,261 +415,6 @@ def generate_io_dataset_ct(
             prev_bearing = continuous_bearing  # Update for next iteration
 
     return u_data, y_data
-
-
-def _ekf_filter_single(
-    y_seq, u_seq, dt,
-    x0_mean, x0_cov,
-    mu_w, Q,
-    mu_v, R,
-    f, F_jac, h, H_jac
-):
-    """
-    EKF forward pass for one trajectory.
-    Shapes:
-      y_seq: (T+1, ny, 1)
-      u_seq: (T,   nu, 1)
-    Returns:
-      m_pred, P_pred: predicted at each t (t=0 uses prior)
-      m_filt, P_filt: filtered at each t
-      F_list: list of F_t (length T) where F_t is Jacobian at (m_filt[t], u_t)
-    """
-    T = u_seq.shape[0]
-    nx = x0_mean.shape[0]
-    I = np.eye(nx)
-
-    m_pred = np.zeros((T+1, nx, 1))
-    P_pred = np.zeros((T+1, nx, nx))
-    m_filt = np.zeros((T+1, nx, 1))
-    P_filt = np.zeros((T+1, nx, nx))
-    F_list = []
-
-    # prior at t=0
-    m_pred[0] = x0_mean.copy()
-    P_pred[0] = x0_cov.copy()
-
-    # update with y0
-    H0 = H_jac(m_pred[0])
-    yhat0 = h(m_pred[0]) + mu_v
-    innov0 = y_seq[0] - yhat0
-    innov0[1, 0] = wrap_angle(innov0[1, 0])  # Wrap bearing innovation
-    S0 = H0 @ P_pred[0] @ H0.T + R
-    S0 = 0.5 * (S0 + S0.T)
-    K0 = P_pred[0] @ H0.T @ np.linalg.solve(S0, np.eye(S0.shape[0]))
-    m_filt[0] = m_pred[0] + K0 @ innov0
-    P_filt[0] = (I - K0 @ H0) @ P_pred[0] @ (I - K0 @ H0).T + K0 @ R @ K0.T
-    P_filt[0] = 0.5 * (P_filt[0] + P_filt[0].T)
-
-    for t in range(T):
-        # predict to t+1
-        Ft = F_jac(m_filt[t], u_seq[t], dt)
-        F_list.append(Ft)
-
-        m_pred[t+1] = f(m_filt[t], u_seq[t], dt) + mu_w
-        P_pred[t+1] = Ft @ P_filt[t] @ Ft.T + Q
-        P_pred[t+1] = 0.5 * (P_pred[t+1] + P_pred[t+1].T)
-
-        # update with y_{t+1}
-        Ht = H_jac(m_pred[t+1])
-        yhat = h(m_pred[t+1]) + mu_v
-        innov = y_seq[t+1] - yhat
-        innov[1, 0] = wrap_angle(innov[1, 0])  # Wrap bearing innovation
-        S = Ht @ P_pred[t+1] @ Ht.T + R
-        S = 0.5 * (S + S.T)
-        K = P_pred[t+1] @ Ht.T @ np.linalg.solve(S, np.eye(S.shape[0]))
-
-        m_filt[t+1] = m_pred[t+1] + K @ innov
-        P_filt[t+1] = (I - K @ Ht) @ P_pred[t+1] @ (I - K @ Ht).T + K @ R @ K.T
-        P_filt[t+1] = 0.5 * (P_filt[t+1] + P_filt[t+1].T)
-
-    return m_pred, P_pred, m_filt, P_filt, F_list
-
-
-def _rts_smoother_single(m_pred, P_pred, m_filt, P_filt, F_list):
-    """
-    Extended RTS smoother (uses stored Jacobians F_list).
-    Returns:
-      m_smooth, P_smooth
-    """
-    T = len(F_list)
-    nx = m_filt.shape[1]
-    m_smooth = m_filt.copy()
-    P_smooth = P_filt.copy()
-
-    for t in range(T-1, -1, -1):
-        Ft = F_list[t]
-        # smoother gain
-        Ppred_next = P_pred[t+1]
-        Ppred_next = 0.5 * (Ppred_next + Ppred_next.T)
-        Gt = P_filt[t] @ Ft.T @ np.linalg.solve(Ppred_next, np.eye(nx))
-
-        m_smooth[t] = m_filt[t] + Gt @ (m_smooth[t+1] - m_pred[t+1])
-        P_smooth[t] = P_filt[t] + Gt @ (P_smooth[t+1] - P_pred[t+1]) @ Gt.T
-        P_smooth[t] = 0.5 * (P_smooth[t] + P_smooth[t].T)
-
-    return m_smooth, P_smooth
-
-
-def estimate_nominal_parameters_EM(
-    u_data, y_data, dt,
-    x0_mean_init, x0_cov_init,
-    mu_w_init=None, Sigma_w_init=None,
-    mu_v_init=None, Sigma_v_init=None,
-    f=ct_dynamics,
-    F_jac=ct_jacobian,
-    h=radar_observation_function,
-    H_jac=radar_observation_jacobian,
-    max_iters=10,
-    tol=1e-4,
-    estimate_means=False,
-    estimate_x0=False,
-    cov_structure="diag",      # "full" | "diag" | "scalar"
-    reg=1e-6,
-    verbose=True
-):
-    """
-    EM-like nominal parameter estimation from input-output data for CT model.
-
-    Inputs:
-      u_data: (N, T, 2, 1) or (T, 2, 1)
-      y_data: (N, T+1, 2, 1) or (T+1, 2, 1)
-
-    Returns tuple:
-      (nominal_x0_mean, nominal_x0_cov, nominal_mu_w, nominal_Sigma_w, nominal_mu_v, nominal_Sigma_v)
-    """
-    # Normalize shapes to (N, ...)
-    if u_data.ndim == 3:  # (T,2,1)
-        u_data = u_data[None, ...]
-    if y_data.ndim == 3:  # (T+1,2,1)
-        y_data = y_data[None, ...]
-
-    N = u_data.shape[0]
-    T = u_data.shape[1]
-    nx = x0_mean_init.shape[0]
-    ny = y_data.shape[2]
-
-    x0_mean = x0_mean_init.copy()
-    x0_cov = x0_cov_init.copy()
-
-    mu_w = np.zeros((nx, 1)) if mu_w_init is None else mu_w_init.copy()
-    Q = 0.1 * np.eye(nx) if Sigma_w_init is None else Sigma_w_init.copy()
-
-    mu_v = np.zeros((ny, 1)) if mu_v_init is None else mu_v_init.copy()
-    R = 0.1 * np.eye(ny) if Sigma_v_init is None else Sigma_v_init.copy()
-
-    # enforce SPD at start
-    x0_cov = enforce_positive_definiteness(x0_cov)
-    Q = enforce_positive_definiteness(Q)
-    R = enforce_positive_definiteness(R)
-
-    def _apply_structure(S):
-        if cov_structure == "full":
-            return S
-        if cov_structure == "diag":
-            return np.diag(np.diag(S))
-        if cov_structure == "scalar":
-            s = float(np.trace(S) / S.shape[0])
-            return s * np.eye(S.shape[0])
-        raise ValueError(f"Unknown cov_structure={cov_structure}")
-
-    prev_obj = None
-    for it in range(max_iters):
-        # Accumulators for M-step
-        w_res_list = []
-        v_res_list = []
-        x0_list = []
-        x0_cov_list = []
-
-        # E-step: smooth each rollout
-        for k in range(N):
-            y_seq = y_data[k]
-            u_seq = u_data[k]
-
-            m_pred, P_pred, m_filt, P_filt, F_list = _ekf_filter_single(
-                y_seq, u_seq, dt,
-                x0_mean, x0_cov,
-                mu_w, Q,
-                mu_v, R,
-                f, F_jac, h, H_jac
-            )
-            m_smooth, P_smooth = _rts_smoother_single(m_pred, P_pred, m_filt, P_filt, F_list)
-            # No angle wrapping needed for CT state (no theta component)
-
-            if estimate_x0:
-                x0_list.append(m_smooth[0])
-                x0_cov_list.append(P_smooth[0])
-
-            # residuals
-            for t in range(T):
-                # w_t approx
-                w_hat = m_smooth[t+1] - f(m_smooth[t], u_seq[t], dt)
-                w_res_list.append(w_hat)
-
-            for t in range(T+1):
-                v_hat = y_seq[t] - h(m_smooth[t])
-                # Wrap bearing component of measurement residual
-                v_hat[1, 0] = wrap_angle(v_hat[1, 0])
-                v_res_list.append(v_hat)
-
-        # Stack residuals: shape (dim, count)
-        W = np.hstack(w_res_list)  # (nx, N*T)
-        V = np.hstack(v_res_list)  # (ny, N*(T+1))
-
-        # M-step: means
-        if estimate_means:
-            mu_w_new = np.mean(W, axis=1, keepdims=True)
-            mu_v_new = np.mean(V, axis=1, keepdims=True)
-        else:
-            mu_w_new = mu_w
-            mu_v_new = mu_v
-
-        # M-step: covariances (moment-matching)
-        Wc = W - mu_w_new
-        Vc = V - mu_v_new
-
-        Q_new = (Wc @ Wc.T) / max(Wc.shape[1], 1)
-        R_new = (Vc @ Vc.T) / max(Vc.shape[1], 1)
-
-        # Regularize + structure + SPD
-        Q_new = _apply_structure(Q_new) + reg * np.eye(nx)
-        R_new = _apply_structure(R_new) + reg * np.eye(ny)
-
-        Q_new = enforce_positive_definiteness(Q_new)
-        R_new = enforce_positive_definiteness(R_new)
-
-        # x0 updates
-        if estimate_x0 and len(x0_list) > 0:
-            X0 = np.hstack(x0_list)  # (nx, N)
-            x0_mean_new = np.mean(X0, axis=1, keepdims=True)
-            # include smoother covariance at t=0
-            P0_bar = sum(x0_cov_list) / len(x0_cov_list)
-            centered = X0 - x0_mean_new
-            x0_cov_new = P0_bar + (centered @ centered.T) / max(centered.shape[1], 1)
-            x0_cov_new = _apply_structure(x0_cov_new) + reg * np.eye(nx)
-            x0_cov_new = enforce_positive_definiteness(x0_cov_new)
-        else:
-            x0_mean_new = x0_mean
-            x0_cov_new = x0_cov
-
-        # Convergence check (relative change)
-        dQ = np.linalg.norm(Q_new - Q, ord="fro") / (np.linalg.norm(Q, ord="fro") + 1e-12)
-        dR = np.linalg.norm(R_new - R, ord="fro") / (np.linalg.norm(R, ord="fro") + 1e-12)
-        dx0 = np.linalg.norm(x0_mean_new - x0_mean) / (np.linalg.norm(x0_mean) + 1e-12)
-
-        if verbose:
-            print(f"[EM] iter={it:02d}  rel_change: dQ={dQ:.3e}, dR={dR:.3e}, dx0={dx0:.3e}")
-
-        # Update params
-        mu_w, Q = mu_w_new, Q_new
-        mu_v, R = mu_v_new, R_new
-        x0_mean, x0_cov = x0_mean_new, x0_cov_new
-
-        if max(dQ, dR, dx0) < tol:
-            if verbose:
-                print(f"[EM] Converged at iter={it} (tol={tol}).")
-            break
-
-    return x0_mean, x0_cov, mu_w, Q, mu_v, R
 
 def run_experiment(exp_idx, dist, num_sim, seed_base, robust_val, filters_to_execute, T_steps, 
                   nominal_params, true_params, num_samples=100):
@@ -849,26 +590,30 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
         
         v_max = v_min = w_max = w_min = x0_max = x0_min = None
         x0_scale = w_scale = v_scale = None
-    else:  # U-quadratic (match Gaussian covariance / scale)
+    else:  # U-quadratic (independent definition)
         # For U-quadratic with support [min,max], Var = (3/20)*(max-min)^2.
-        # If symmetric bounds ±A, Var = (3/5)*A^2.
-        # To match Gaussian std sigma: A = sqrt(5/3)*sigma.
+        # Mean = (max + min) / 2
 
-        # --- bounds for U-quadratic ---
-        w_max = np.sqrt(5.0 / 3.0) * np.array([0.01, 0.01, 0.05, 0.05, 0.02])
+        # --- Initial state bounds for U-quadratic ---
+        # State: [px, py, vx, vy, omega]
+        x0_max = np.array([0.5, 0.5, 2.5, 1.5, 0.2])
+        x0_min = np.array([-0.5, -0.5, 1.5, 0.5, 0.1])
+        x0_mean = (0.5 * (x0_max + x0_min)).reshape(-1, 1)
+        x0_cov = 3.0/20.0 * np.diag((x0_max - x0_min)**2)
+
+        # --- Process noise bounds for U-quadratic ---
+        # [px, py, vx, vy, omega]
+        w_max = np.array([0.01, 0.01, 0.05, 0.05, 0.02])
         w_min = -w_max
         mu_w = np.zeros((nx, 1))
-        Sigma_w = 3.0/20.0 * np.diag((w_max - w_min)**2)          # == diag(std_w**2)
+        Sigma_w = 3.0/20.0 * np.diag((w_max - w_min)**2)
 
-        v_max = np.sqrt(5.0 / 3.0) * np.array([0.01, np.deg2rad(0.1)])  
+        # --- Measurement noise bounds for U-quadratic ---
+        # [range, bearing]
+        v_max = np.array([0.02, np.deg2rad(0.1)])
         v_min = -v_max
         mu_v = np.zeros((ny, 1))
-        Sigma_v = 3.0/20.0 * np.diag((v_max - v_min)**2)          # == diag(std_v**2)
-
-        # initial uncertainty: use same scale as Gaussian x0_cov
-        x0_max = np.sqrt(5.0 / 3.0) * np.array([0.5, 0.5, 0.5, 0.5, 0.05])        
-        x0_min = -x0_max
-        x0_cov = 3.0/20.0 * np.diag((x0_max - x0_min)**2)         # == diag(std_x0**2)
+        Sigma_v = 3.0/20.0 * np.diag((v_max - v_min)**2)
 
         x0_scale = w_scale = v_scale = None
     
@@ -903,6 +648,19 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
     )
 
     # 2) EM estimation (Gaussian nominal approximation)
+    # Define wrapping functions for bearing angle measurements
+    def wrap_bearing_innovation(innov):
+        """Wrap bearing component of innovation (for filter updates)"""
+        innov_wrapped = innov.copy()
+        innov_wrapped[1, 0] = wrap_angle(innov_wrapped[1, 0])
+        return innov_wrapped
+
+    def wrap_bearing_residual(residual):
+        """Wrap bearing component of measurement residual (for EM M-step)"""
+        residual_wrapped = residual.copy()
+        residual_wrapped[1, 0] = wrap_angle(residual_wrapped[1, 0])
+        return residual_wrapped
+
     nominal_params = estimate_nominal_parameters_EM(
         u_data=u_data,
         y_data=y_data,
@@ -921,9 +679,13 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
         tol=1e-4,
         estimate_means=False,
         estimate_x0=False,
-        cov_structure="diag",                 # strong recommendation for identifiability
+        cov_structure="full",                 # strong recommendation for identifiability
         reg=1e-6,
-        verbose=True
+        verbose=True,
+        wrap_innovation_fn=wrap_bearing_innovation,         # Wrap bearing innovations in filter
+        wrap_measurement_residual_fn=wrap_bearing_residual, # Wrap bearing in measurement residuals
+        wrap_process_residual_fn=None,                      # No process residual wrapping needed
+        wrap_smoothed_state_fn=None                         # No smoothed state wrapping needed
     )
     
     
