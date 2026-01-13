@@ -416,9 +416,13 @@ def generate_io_dataset_ct(
 
     return u_data, y_data
 
-def run_experiment(exp_idx, dist, num_sim, seed_base, robust_val, filters_to_execute, T_steps, 
+def run_experiment(exp_idx, dist, num_sim, seed_base, theta_vals, filters_to_execute, T_steps,
                   nominal_params, true_params, num_samples=100):
-    """Run single experiment comparing filters"""
+    """Run single experiment comparing filters with specific theta values
+
+    Args:
+        theta_vals: dict with keys 'theta_x', 'theta_v', 'theta_w' containing the theta values for this run
+    """
     experiment_seed = seed_base + exp_idx * 12345
     np.random.seed(experiment_seed)
     
@@ -437,9 +441,14 @@ def run_experiment(exp_idx, dist, num_sim, seed_base, robust_val, filters_to_exe
      x0_max, x0_min, w_max, w_min, v_max, v_min, x0_scale, w_scale, v_scale) = true_params
     
     # Extract nominal parameters (shared across all filters)
-    (nominal_x0_mean, nominal_x0_cov, nominal_mu_w, nominal_Sigma_w, 
+    (nominal_x0_mean, nominal_x0_cov, nominal_mu_w, nominal_Sigma_w,
      nominal_mu_v, nominal_Sigma_v) = nominal_params
-    
+
+    # Extract theta values
+    theta_x = theta_vals['theta_x']
+    theta_v = theta_vals['theta_v']
+    theta_w = theta_vals.get('theta_w', None)  # Only used by TAC
+
     results = {filter_name: [] for filter_name in filters_to_execute}
     
     # Run simulations with shared noise realizations
@@ -482,10 +491,10 @@ def run_experiment(exp_idx, dist, num_sim, seed_base, robust_val, filters_to_exe
                                              dynamics_jacobian=ct_jacobian,
                                              observation_function=radar_observation_function,
                                              observation_jacobian=radar_observation_jacobian,
-                                             theta_x=robust_val, theta_v=robust_val,
+                                             theta_x=theta_x, theta_v=theta_v,
                                              x0_max=x0_max, x0_min=x0_min, w_max=w_max, w_min=w_min,
                                              v_max=v_max, v_min=v_min, x0_scale=x0_scale, w_scale=w_scale, v_scale=v_scale)
-            
+
             elif filter_name == 'DR_EKF_TAC':
                 estimator = DR_EKF_TAC(T=T, dist=dist, noise_dist=dist, system_data=system_data, B=B,
                                                 true_x0_mean=x0_mean, true_x0_cov=x0_cov,
@@ -498,10 +507,10 @@ def run_experiment(exp_idx, dist, num_sim, seed_base, robust_val, filters_to_exe
                                                 dynamics_jacobian=ct_jacobian,
                                                 observation_function=radar_observation_function,
                                                 observation_jacobian=radar_observation_jacobian,
-                                                theta_x=robust_val, theta_v=robust_val, theta_w=robust_val,
+                                                theta_x=theta_x, theta_v=theta_v, theta_w=theta_w,
                                                 x0_max=x0_max, x0_min=x0_min, w_max=w_max, w_min=w_min,
                                                 v_max=v_max, v_min=v_min, x0_scale=x0_scale, w_scale=w_scale, v_scale=v_scale)
-            
+
             elif filter_name == 'DR_EKF_CDC_FW':
                 estimator = DR_EKF_CDC(T=T, dist=dist, noise_dist=dist, system_data=system_data, B=B,
                                              true_x0_mean=x0_mean, true_x0_cov=x0_cov,
@@ -514,7 +523,7 @@ def run_experiment(exp_idx, dist, num_sim, seed_base, robust_val, filters_to_exe
                                              dynamics_jacobian=ct_jacobian,
                                              observation_function=radar_observation_function,
                                              observation_jacobian=radar_observation_jacobian,
-                                             theta_x=robust_val, theta_v=robust_val,
+                                             theta_x=theta_x, theta_v=theta_v,
                                              solver="fw",  # Use Frank-Wolfe solver
                                              x0_max=x0_max, x0_min=x0_min, w_max=w_max, w_min=w_min,
                                              v_max=v_max, v_min=v_min, x0_scale=x0_scale, w_scale=w_scale, v_scale=v_scale)
@@ -557,7 +566,14 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
     dt = 0.2
     T_steps = int(T_total / dt)
     
-    robust_vals = [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
+    # Separate theta values for different noise sources
+    theta_x_vals = [0.05, 0.1, 1.0, 2.0]  
+    theta_v_vals = [0.05, 0.1, 1.0]  
+    theta_w_vals = [0.05, 0.1, 1.0, 2.0] 
+
+    # Fixed theta_x for TAC filter
+    tac_theta_x_fixed = 0.1
+
     filters_to_execute = ['EKF', 'DR_EKF_CDC', 'DR_EKF_TAC', 'DR_EKF_CDC_FW']
     
     # Set up problem parameters for nominal estimation
@@ -580,12 +596,12 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
         # Process noise: [px, py, vx, vy, omega]
         sigma_px = sigma_py = 0.01  # position noise (m)
         sigma_vx = sigma_vy = 0.05  # velocity noise (m/s)
-        sigma_omega = 0.015          # turn rate noise (rad/s)
+        sigma_omega = 0.02          # turn rate noise (rad/s)
         Sigma_w = np.diag([sigma_px**2, sigma_py**2, sigma_vx**2, sigma_vy**2, sigma_omega**2])
         
         # Measurement noise: [range, bearing]
-        sigma_range = 0.01                    # range noise (m)
-        sigma_bearing = np.deg2rad(0.1)      # bearing noise (rad)
+        sigma_range = 0.025                    # range noise (m)
+        sigma_bearing = np.deg2rad(0.2)      # bearing noise (rad)
         Sigma_v = np.diag([sigma_range**2, sigma_bearing**2])
         
         v_max = v_min = w_max = w_min = x0_max = x0_min = None
@@ -610,7 +626,7 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
 
         # --- Measurement noise bounds for U-quadratic ---
         # [range, bearing]
-        v_max = np.array([0.02, np.deg2rad(0.1)])
+        v_max = np.array([0.02, np.deg2rad(0.2)])
         v_min = -v_max
         mu_v = np.zeros((ny, 1))
         Sigma_v = 3.0/20.0 * np.diag((v_max - v_min)**2)
@@ -694,109 +710,210 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
     print(f"  Nominal mu_w: {nominal_params[2].flatten()}")
     print(f"  Nominal mu_v: {nominal_params[4].flatten()}")
     
-    all_results = {}
-    
-    for robust_val in robust_vals:
-        print(f"Running experiments for robust parameter = {robust_val}")
-        
+    # Storage for all results: filter_name -> theta_combination -> results
+    all_results = {filter_name: {} for filter_name in filters_to_execute}
+
+    # Generate theta combinations for CDC-based filters (theta_x, theta_v)
+    from itertools import product
+    cdc_theta_combinations = list(product(theta_x_vals, theta_v_vals))
+
+    # Generate theta combinations for TAC filter (theta_v, theta_w with fixed theta_x)
+    tac_theta_combinations = list(product(theta_v_vals, theta_w_vals))
+
+    print(f"Running grid search:")
+    print(f"  CDC/CDC_FW: {len(cdc_theta_combinations)} combinations (theta_x × theta_v)")
+    print(f"  TAC: {len(tac_theta_combinations)} combinations (theta_v × theta_w, with theta_x={tac_theta_x_fixed} fixed)")
+    print(f"  EKF: 1 configuration (no theta parameters)")
+
+    # Run experiments for CDC-based filters (DR_EKF_CDC, DR_EKF_CDC_FW)
+    cdc_filters = [f for f in filters_to_execute if f in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']]
+    for theta_x, theta_v in cdc_theta_combinations:
+        print(f"\nRunning CDC-based filters with θ_x={theta_x}, θ_v={theta_v}")
+
+        theta_vals = {'theta_x': theta_x, 'theta_v': theta_v}
+
         experiments = Parallel(n_jobs=-1, backend='loky')(
-            delayed(run_experiment)(exp_idx, dist, num_sim, seed_base, robust_val, 
-                                   filters_to_execute, T_steps, nominal_params, true_params, num_samples)
+            delayed(run_experiment)(exp_idx, dist, num_sim, seed_base, theta_vals,
+                                   cdc_filters, T_steps, nominal_params, true_params, num_samples)
             for exp_idx in range(num_exp)
         )
-        
-        # Aggregate results
-        aggregated = {filter_name: {'mse': []} for filter_name in filters_to_execute}
-        
-        for exp in experiments:
-            for filter_name in filters_to_execute:
+
+        # Aggregate results for each CDC filter
+        for filter_name in cdc_filters:
+            aggregated_mse = []
+            aggregated_detailed_results = []
+
+            for exp in experiments:
                 if filter_name in exp:
-                    aggregated[filter_name]['mse'].append(exp[filter_name]['mse_mean'])
-                    
-        
-        # Compute statistics
-        final_results = {}
-        for filter_name in filters_to_execute:
-            if aggregated[filter_name]['mse']:
-                result_dict = {
-                    'mse_mean': np.mean(aggregated[filter_name]['mse']),
-                    'mse_std': np.std(aggregated[filter_name]['mse'])
+                    aggregated_mse.append(exp[filter_name]['mse_mean'])
+                    if 'results' in exp[filter_name]:
+                        aggregated_detailed_results.extend(exp[filter_name]['results'])
+
+            if aggregated_mse:
+                theta_key = (theta_x, theta_v)
+                all_results[filter_name][theta_key] = {
+                    'mse_mean': np.mean(aggregated_mse),
+                    'mse_std': np.std(aggregated_mse),
+                    'theta_x': theta_x,
+                    'theta_v': theta_v,
+                    'results': aggregated_detailed_results
                 }
-                
-                
-                final_results[filter_name] = result_dict
-        
-        all_results[robust_val] = final_results
-        
-        # Save detailed experiment data (including trajectories) aggregated across all experiments
-        # This will be used by plot0_with_FW.py for visualization
-        if robust_val in [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]:  # Save for all theta values
-            # Ensure directory exists
-            detailed_results_dir = "./results/EKF_comparison_with_FW_CT/"
-            if not os.path.exists(detailed_results_dir):
-                os.makedirs(detailed_results_dir)
-            
-            detailed_results_path = os.path.join(detailed_results_dir, f'detailed_results_{robust_val}_{dist}.pkl')
-            
-            # Aggregate trajectory data from all experiments
-            aggregated_detailed = {}
-            for filter_name in filters_to_execute:
-                all_sim_results = []
-                # Collect simulation results from all experiments
-                for exp in experiments:
-                    if filter_name in exp and 'results' in exp[filter_name]:
-                        all_sim_results.extend(exp[filter_name]['results'])
-                
-                if all_sim_results:
-                    aggregated_detailed[filter_name] = {
-                        'mse_mean': np.mean([np.mean(r['mse']) for r in all_sim_results]),
-                        'results': all_sim_results  # All num_sim * num_exp trajectories
-                    }
-            
-            save_data(detailed_results_path, aggregated_detailed)
-        print(f"Results for θ={robust_val}:")
-        for filter_name, stats in final_results.items():
-            print(f"  {filter_name}: MSE={stats['mse_mean']:.4f}±{stats['mse_std']:.4f}")
+                print(f"  {filter_name}: MSE={np.mean(aggregated_mse):.4f}±{np.std(aggregated_mse):.4f}")
+
+    # Run experiments for TAC filter (DR_EKF_TAC) with fixed theta_x
+    tac_filters = [f for f in filters_to_execute if f == 'DR_EKF_TAC']
+    for theta_v, theta_w in tac_theta_combinations:
+        theta_x = tac_theta_x_fixed  # Fixed value
+        print(f"\nRunning TAC filter with θ_x={theta_x} (fixed), θ_v={theta_v}, θ_w={theta_w}")
+
+        theta_vals = {'theta_x': theta_x, 'theta_v': theta_v, 'theta_w': theta_w}
+
+        experiments = Parallel(n_jobs=-1, backend='loky')(
+            delayed(run_experiment)(exp_idx, dist, num_sim, seed_base, theta_vals,
+                                   tac_filters, T_steps, nominal_params, true_params, num_samples)
+            for exp_idx in range(num_exp)
+        )
+
+        # Aggregate results for TAC filter
+        for filter_name in tac_filters:
+            aggregated_mse = []
+            aggregated_detailed_results = []
+
+            for exp in experiments:
+                if filter_name in exp:
+                    aggregated_mse.append(exp[filter_name]['mse_mean'])
+                    if 'results' in exp[filter_name]:
+                        aggregated_detailed_results.extend(exp[filter_name]['results'])
+
+            if aggregated_mse:
+                theta_key = (theta_x, theta_v, theta_w)
+                all_results[filter_name][theta_key] = {
+                    'mse_mean': np.mean(aggregated_mse),
+                    'mse_std': np.std(aggregated_mse),
+                    'theta_x': theta_x,
+                    'theta_v': theta_v,
+                    'theta_w': theta_w,
+                    'results': aggregated_detailed_results
+                }
+                print(f"  {filter_name}: MSE={np.mean(aggregated_mse):.4f}±{np.std(aggregated_mse):.4f}")
+
+    # Run experiments for EKF (no theta parameters)
+    ekf_filters = [f for f in filters_to_execute if f == 'EKF']
+    if ekf_filters:
+        print(f"\nRunning EKF (no theta parameters)")
+
+        theta_vals = {'theta_x': None, 'theta_v': None}  # Dummy values for EKF
+
+        experiments = Parallel(n_jobs=-1, backend='loky')(
+            delayed(run_experiment)(exp_idx, dist, num_sim, seed_base, theta_vals,
+                                   ekf_filters, T_steps, nominal_params, true_params, num_samples)
+            for exp_idx in range(num_exp)
+        )
+
+        # Aggregate results for EKF
+        for filter_name in ekf_filters:
+            aggregated_mse = []
+            aggregated_detailed_results = []
+
+            for exp in experiments:
+                if filter_name in exp:
+                    aggregated_mse.append(exp[filter_name]['mse_mean'])
+                    if 'results' in exp[filter_name]:
+                        aggregated_detailed_results.extend(exp[filter_name]['results'])
+
+            if aggregated_mse:
+                theta_key = 'no_theta'
+                all_results[filter_name][theta_key] = {
+                    'mse_mean': np.mean(aggregated_mse),
+                    'mse_std': np.std(aggregated_mse),
+                    'results': aggregated_detailed_results
+                }
+                print(f"  {filter_name}: MSE={np.mean(aggregated_mse):.4f}±{np.std(aggregated_mse):.4f}")
     
     # Find optimal theta for each filter based on MSE
+    print("\n" + "="*80)
+    print("OPTIMAL THETA SELECTION")
+    print("="*80)
+
     optimal_results = {}
     for filter_name in filters_to_execute:
+        if filter_name not in all_results or not all_results[filter_name]:
+            continue
+
         best_mse = np.inf
-        best_theta = None
+        best_theta_key = None
         best_stats = None
-        
-        for theta, results in all_results.items():
-            if filter_name in results:
-                mse = results[filter_name]['mse_mean']
-                if mse < best_mse:
-                    best_mse = mse
-                    best_theta = theta
-                    best_stats = results[filter_name]
-        
-        if best_theta is not None:
-            optimal_results[filter_name] = {
-                'theta': best_theta,
-                **best_stats
-            }
-            print(f"{filter_name}: Optimal θ={best_theta}, MSE={best_mse:.4f}")
+
+        # Find best theta combination for this filter
+        for theta_key, results in all_results[filter_name].items():
+            mse = results['mse_mean']
+            if mse < best_mse:
+                best_mse = mse
+                best_theta_key = theta_key
+                best_stats = results
+
+        if best_theta_key is not None:
+            optimal_results[filter_name] = best_stats
+
+            # Print optimal theta based on filter type
+            if filter_name == 'EKF':
+                print(f"{filter_name}: MSE={best_mse:.4f} (no theta parameters)")
+            elif filter_name in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']:
+                print(f"{filter_name}: Optimal θ_x={best_stats['theta_x']}, θ_v={best_stats['theta_v']}, MSE={best_mse:.4f}")
+            elif filter_name == 'DR_EKF_TAC':
+                print(f"{filter_name}: Optimal θ_x={best_stats['theta_x']} (fixed), θ_v={best_stats['theta_v']}, θ_w={best_stats['theta_w']}, MSE={best_mse:.4f}")
     
     # Save results
     results_path = "./results/EKF_comparison_with_FW_CT/"
     if not os.path.exists(results_path):
         os.makedirs(results_path)
-    
+
     save_data(os.path.join(results_path, f'all_results_{dist}.pkl'), all_results)
     save_data(os.path.join(results_path, f'optimal_results_{dist}.pkl'), optimal_results)
+
+    # Save detailed results for optimal theta combinations
+    for filter_name, stats in optimal_results.items():
+        if 'results' in stats and stats['results']:
+            if filter_name == 'EKF':
+                filename = f'detailed_results_{filter_name}_{dist}.pkl'
+            elif filter_name in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']:
+                theta_x, theta_v = stats['theta_x'], stats['theta_v']
+                filename = f'detailed_results_{filter_name}_tx{theta_x}_tv{theta_v}_{dist}.pkl'
+            elif filter_name == 'DR_EKF_TAC':
+                theta_x, theta_v, theta_w = stats['theta_x'], stats['theta_v'], stats['theta_w']
+                filename = f'detailed_results_{filter_name}_tx{theta_x}_tv{theta_v}_tw{theta_w}_{dist}.pkl'
+            else:
+                filename = f'detailed_results_{filter_name}_{dist}.pkl'
+
+            detailed_path = os.path.join(results_path, filename)
+            detailed_data = {
+                filter_name: {
+                    'mse_mean': stats['mse_mean'],
+                    'results': stats['results']
+                }
+            }
+            save_data(detailed_path, detailed_data)
+            print(f"Saved detailed results for {filter_name} to {filename}")
     
     print(f"\nEKF vs DR-EKF comparison with Frank-Wolfe completed. Results saved to {results_path}")
-    
-    
-    print("\nFinal Results Summary:")
-    print("{:<15} {:<15} {:<20}".format("Filter", "Optimal θ", "MSE"))
-    print("-" * 50)
+
+    print("\n" + "="*80)
+    print("FINAL RESULTS SUMMARY")
+    print("="*80)
+    print(f"{'Filter':<20} {'Optimal Theta':<45} {'MSE':<15}")
+    print("-" * 80)
     for filter_name, stats in optimal_results.items():
-        print("{:<15} {:<15} {:<20.4f}".format(
-            filter_name, stats['theta'], stats['mse_mean']))
+        if filter_name == 'EKF':
+            theta_str = "N/A"
+        elif filter_name in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']:
+            theta_str = f"θ_x={stats['theta_x']}, θ_v={stats['theta_v']}"
+        elif filter_name == 'DR_EKF_TAC':
+            theta_str = f"θ_x={stats['theta_x']} (fixed), θ_v={stats['theta_v']}, θ_w={stats['theta_w']}"
+        else:
+            theta_str = "Unknown"
+
+        print(f"{filter_name:<20} {theta_str:<45} {stats['mse_mean']:<15.4f}")
+    print("="*80)
     
     return all_results
 
@@ -806,7 +923,7 @@ if __name__ == "__main__":
                         help="Uncertainty distribution (normal or quadratic)")
     parser.add_argument('--num_sim', default=1, type=int,
                         help="Number of simulation runs per experiment")
-    parser.add_argument('--num_exp', default=10, type=int,
+    parser.add_argument('--num_exp', default=5, type=int,
                         help="Number of independent experiments")
     parser.add_argument('--T_total', default=50.0, type=float,
                         help="Total simulation time")

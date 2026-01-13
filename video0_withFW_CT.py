@@ -25,139 +25,190 @@ def load_optimal_results(results_path, dist):
     
     return optimal_results
 
-def load_detailed_results(results_path, theta_val, dist):
-    """Load detailed trajectory data for a specific theta value."""
-    detailed_file = os.path.join(results_path, f'detailed_results_{theta_val}_{dist}.pkl')
-    
+def load_detailed_results_for_filter(results_path, filter_name, theta_vals, dist):
+    """Load detailed trajectory data for a specific filter with its optimal theta values."""
+
+    # Construct filename based on filter type and theta values
+    if filter_name == 'EKF':
+        filename = f'detailed_results_{filter_name}_{dist}.pkl'
+    elif filter_name in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']:
+        theta_x, theta_v = theta_vals['theta_x'], theta_vals['theta_v']
+        filename = f'detailed_results_{filter_name}_tx{theta_x}_tv{theta_v}_{dist}.pkl'
+    elif filter_name == 'DR_EKF_TAC':
+        theta_x, theta_v, theta_w = theta_vals['theta_x'], theta_vals['theta_v'], theta_vals['theta_w']
+        filename = f'detailed_results_{filter_name}_tx{theta_x}_tv{theta_v}_tw{theta_w}_{dist}.pkl'
+    else:
+        raise ValueError(f"Unknown filter name: {filter_name}")
+
+    detailed_file = os.path.join(results_path, filename)
+
     if not os.path.exists(detailed_file):
         raise FileNotFoundError(f"Detailed results file not found: {detailed_file}")
-    
+
     with open(detailed_file, 'rb') as f:
         detailed_results = pickle.load(f)
-    
+
     return detailed_results
 
 def extract_mean_trajectories(optimal_results, results_path, dist):
     """Extract mean trajectory for each filter using optimal parameters."""
-    filters_order = ['EKF', 'DR_EKF_CDC', 'DR_EKF_TAC', 'DR_EKF_CDC_FW']
+    filters_order = ['EKF', 'DR_EKF_TAC', 'DR_EKF_CDC', 'DR_EKF_CDC_FW']
     trajectory_data = {}
-    
+
     for filt in filters_order:
         if filt not in optimal_results:
             print(f"Warning: Filter '{filt}' not found in optimal results, skipping...")
             continue
-        
-        # Get optimal theta for this filter
-        optimal_theta = optimal_results[filt]['theta']
-        print(f"Loading trajectory data for {filt} with θ* = {optimal_theta}")
-        
+
+        # Get optimal theta values for this filter
+        optimal_stats = optimal_results[filt]
+
+        if filt == 'EKF':
+            theta_vals = {}
+            theta_str = "N/A"
+        elif filt in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']:
+            theta_vals = {
+                'theta_x': optimal_stats['theta_x'],
+                'theta_v': optimal_stats['theta_v']
+            }
+            theta_str = f"θ_x={theta_vals['theta_x']}, θ_v={theta_vals['theta_v']}"
+        elif filt == 'DR_EKF_TAC':
+            theta_vals = {
+                'theta_x': optimal_stats['theta_x'],
+                'theta_v': optimal_stats['theta_v'],
+                'theta_w': optimal_stats['theta_w']
+            }
+            theta_str = f"θ_x={theta_vals['theta_x']}, θ_v={theta_vals['theta_v']}, θ_w={theta_vals['theta_w']}"
+
+        print(f"Loading trajectory data for {filt} with {theta_str}")
+
         try:
-            # Load detailed results for this theta value
-            detailed_results = load_detailed_results(results_path, optimal_theta, dist)
-            
+            # Load detailed results for this filter
+            detailed_results = load_detailed_results_for_filter(results_path, filt, theta_vals, dist)
+
             if filt not in detailed_results:
-                print(f"Warning: Filter {filt} not found in detailed results for theta {optimal_theta}")
+                print(f"Warning: Filter {filt} not found in detailed results")
                 continue
-            
+
             # Extract simulation results
             filter_results = detailed_results[filt]
             sim_results = filter_results['results']  # List of simulation results
-            
+
             est_trajectories = []
             true_trajectories = []
-            
+
             for result in sim_results:  # Each simulation result
-                # Estimated trajectory 
+                # Estimated trajectory
                 est_traj = result['est_state_traj']  # Shape: (T+1, nx, 1)
                 est_trajectories.append(np.squeeze(est_traj, axis=-1))  # Remove last dimension
-                
+
                 # True trajectory (for reference)
                 true_traj = result['state_traj']  # Shape: (T+1, nx, 1)
                 true_trajectories.append(np.squeeze(true_traj, axis=-1))
-            
+
             if est_trajectories:
                 # Convert to numpy array and compute mean
                 est_trajectories = np.array(est_trajectories)  # Shape: (num_runs, time_steps, state_dim)
                 true_trajectories = np.array(true_trajectories)
-                
+
                 # Compute mean trajectories
                 mean_est_traj = np.mean(est_trajectories, axis=0)  # (time_steps, state_dim)
                 mean_true_traj = np.mean(true_trajectories, axis=0)  # (time_steps, state_dim)
-                
+
                 trajectory_data[filt] = {
                     'estimated': mean_est_traj,
                     'true': mean_true_traj,
-                    'optimal_theta': optimal_theta
+                    'theta_vals': theta_vals,
+                    'theta_str': theta_str
                 }
                 print(f"Successfully loaded mean trajectory for {filt}")
             else:
                 print(f"No trajectory data found for {filt}")
-                
+
         except FileNotFoundError as e:
-            print(f"Could not load detailed results for {filt} (θ={optimal_theta}): {e}")
+            print(f"Could not load detailed results for {filt}: {e}")
             continue
         except Exception as e:
             print(f"Error loading data for {filt}: {e}")
             continue
-    
+
     return trajectory_data, filters_order
 
 def extract_single_trajectories(optimal_results, results_path, dist, instance_idx=0):
     """Extract single trajectory instance for each filter using optimal parameters."""
-    filters_order = ['EKF', 'DR_EKF_CDC', 'DR_EKF_TAC', 'DR_EKF_CDC_FW']
+    filters_order = ['EKF', 'DR_EKF_TAC', 'DR_EKF_CDC', 'DR_EKF_CDC_FW']
     trajectory_data = {}
-    
+
     for filt in filters_order:
         if filt not in optimal_results:
             print(f"Warning: Filter '{filt}' not found in optimal results, skipping...")
             continue
-        
-        # Get optimal theta for this filter
-        optimal_theta = optimal_results[filt]['theta']
-        print(f"Loading single trajectory data for {filt} with θ* = {optimal_theta}")
-        
+
+        # Get optimal theta values for this filter
+        optimal_stats = optimal_results[filt]
+
+        if filt == 'EKF':
+            theta_vals = {}
+            theta_str = "N/A"
+        elif filt in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']:
+            theta_vals = {
+                'theta_x': optimal_stats['theta_x'],
+                'theta_v': optimal_stats['theta_v']
+            }
+            theta_str = f"θ_x={theta_vals['theta_x']}, θ_v={theta_vals['theta_v']}"
+        elif filt == 'DR_EKF_TAC':
+            theta_vals = {
+                'theta_x': optimal_stats['theta_x'],
+                'theta_v': optimal_stats['theta_v'],
+                'theta_w': optimal_stats['theta_w']
+            }
+            theta_str = f"θ_x={theta_vals['theta_x']}, θ_v={theta_vals['theta_v']}, θ_w={theta_vals['theta_w']}"
+
+        print(f"Loading single trajectory data for {filt} with {theta_str}")
+
         try:
-            # Load detailed results for this theta value
-            detailed_results = load_detailed_results(results_path, optimal_theta, dist)
-            
+            # Load detailed results for this filter
+            detailed_results = load_detailed_results_for_filter(results_path, filt, theta_vals, dist)
+
             if filt not in detailed_results:
-                print(f"Warning: Filter {filt} not found in detailed results for theta {optimal_theta}")
+                print(f"Warning: Filter {filt} not found in detailed results")
                 continue
-            
+
             # Extract simulation results
             filter_results = detailed_results[filt]
             sim_results = filter_results['results']  # List of simulation results
-            
+
             # Check if instance_idx is available
             if instance_idx >= len(sim_results):
                 print(f"Warning: Instance {instance_idx} not available for {filt} (only {len(sim_results)} instances)")
                 continue
-            
+
             # Extract single instance trajectory
             single_result = sim_results[instance_idx]
-            
+
             # Get trajectories
             est_traj = single_result['est_state_traj']  # Shape: (T+1, nx, 1)
             true_traj = single_result['state_traj']  # Shape: (T+1, nx, 1)
-            
+
             # Remove last dimension
             est_trajectory = np.squeeze(est_traj, axis=-1)  # (time_steps, state_dim)
             true_trajectory = np.squeeze(true_traj, axis=-1)  # (time_steps, state_dim)
-            
+
             trajectory_data[filt] = {
                 'estimated': est_trajectory,
                 'true': true_trajectory,
-                'optimal_theta': optimal_theta
+                'theta_vals': theta_vals,
+                'theta_str': theta_str
             }
             print(f"Successfully loaded single trajectory for {filt}")
-                
+
         except FileNotFoundError as e:
-            print(f"Could not load detailed results for {filt} (θ={optimal_theta}): {e}")
+            print(f"Could not load detailed results for {filt}: {e}")
             continue
         except Exception as e:
             print(f"Error loading data for {filt}: {e}")
             continue
-    
+
     return trajectory_data, filters_order
 
 def create_airplane_shape(x, y, heading, scale=1.0):
@@ -455,10 +506,20 @@ def main():
         # Load optimal results
         results_path = "./results/EKF_comparison_with_FW_CT/"
         optimal_results = load_optimal_results(results_path, args.dist)
-        
+
         print(f"Optimal parameters:")
         for filt, data in optimal_results.items():
-            print(f"  {filt}: θ* = {data['theta']}")
+            if filt == 'EKF':
+                print(f"  {filt}: N/A")
+            elif filt in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']:
+                theta_x = data.get('theta_x', 'N/A')
+                theta_v = data.get('theta_v', 'N/A')
+                print(f"  {filt}: θ_x={theta_x}, θ_v={theta_v}")
+            elif filt == 'DR_EKF_TAC':
+                theta_x = data.get('theta_x', 'N/A')
+                theta_v = data.get('theta_v', 'N/A')
+                theta_w = data.get('theta_w', 'N/A')
+                print(f"  {filt}: θ_x={theta_x}, θ_v={theta_v}, θ_w={theta_w}")
         
         # Create results directory if it doesn't exist
         results_dir = os.path.join("results", "EKF_comparison_with_FW_CT")
@@ -489,14 +550,34 @@ def main():
         
         # 2. Create SINGLE INSTANCE trajectory videos (up to 5 instances)
         print("\n=== Creating SINGLE INSTANCE trajectory videos ===")
-        
+
+        # Define filters_order if not already defined
+        if 'filters_order' not in locals():
+            filters_order = ['EKF', 'DR_EKF_TAC', 'DR_EKF_CDC', 'DR_EKF_CDC_FW']
+
         # First check how many instances are available
         max_instances_available = 0
         for filt in filters_order:
             if filt in optimal_results:
-                optimal_theta = optimal_results[filt]['theta']
+                optimal_stats = optimal_results[filt]
+
+                # Get theta values for this filter
+                if filt == 'EKF':
+                    theta_vals = {}
+                elif filt in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']:
+                    theta_vals = {
+                        'theta_x': optimal_stats['theta_x'],
+                        'theta_v': optimal_stats['theta_v']
+                    }
+                elif filt == 'DR_EKF_TAC':
+                    theta_vals = {
+                        'theta_x': optimal_stats['theta_x'],
+                        'theta_v': optimal_stats['theta_v'],
+                        'theta_w': optimal_stats['theta_w']
+                    }
+
                 try:
-                    detailed_results = load_detailed_results(results_path, optimal_theta, args.dist)
+                    detailed_results = load_detailed_results_for_filter(results_path, filt, theta_vals, args.dist)
                     if filt in detailed_results:
                         sim_results = detailed_results[filt]['results']
                         max_instances_available = max(max_instances_available, len(sim_results))
