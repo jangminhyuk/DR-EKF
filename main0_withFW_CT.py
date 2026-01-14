@@ -568,11 +568,11 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
     
     # Separate theta values for different noise sources
     theta_x_vals = [0.05, 0.1, 1.0, 2.0]  
-    theta_v_vals = [0.05, 0.1, 1.0]  
+    theta_v_vals = [0.01, 0.05, 0.1]  
     theta_w_vals = [0.05, 0.1, 1.0, 2.0] 
 
     # Fixed theta_x for TAC filter
-    tac_theta_x_fixed = 0.1
+    tac_theta_x_fixed = 0.05
 
     filters_to_execute = ['EKF', 'DR_EKF_CDC', 'DR_EKF_TAC', 'DR_EKF_CDC_FW']
     
@@ -725,6 +725,42 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
     print(f"  TAC: {len(tac_theta_combinations)} combinations (theta_v × theta_w, with theta_x={tac_theta_x_fixed} fixed)")
     print(f"  EKF: 1 configuration (no theta parameters)")
 
+    # Run EKF first to establish baseline
+    ekf_filters = [f for f in filters_to_execute if f == 'EKF']
+    if ekf_filters:
+        print(f"\n" + "="*80)
+        print(f"Running EKF baseline (no theta parameters)")
+        print("="*80)
+
+        theta_vals = {'theta_x': None, 'theta_v': None}  # Dummy values for EKF
+
+        experiments = Parallel(n_jobs=-1, backend='loky')(
+            delayed(run_experiment)(exp_idx, dist, num_sim, seed_base, theta_vals,
+                                   ekf_filters, T_steps, nominal_params, true_params, num_samples)
+            for exp_idx in range(num_exp)
+        )
+
+        # Aggregate results for EKF
+        for filter_name in ekf_filters:
+            aggregated_mse = []
+            aggregated_detailed_results = []
+
+            for exp in experiments:
+                if filter_name in exp:
+                    aggregated_mse.append(exp[filter_name]['mse_mean'])
+                    if 'results' in exp[filter_name]:
+                        aggregated_detailed_results.extend(exp[filter_name]['results'])
+
+            if aggregated_mse:
+                theta_key = 'no_theta'
+                all_results[filter_name][theta_key] = {
+                    'mse_mean': np.mean(aggregated_mse),
+                    'mse_std': np.std(aggregated_mse),
+                    'results': aggregated_detailed_results
+                }
+                print(f"\n{filter_name} Baseline MSE: {np.mean(aggregated_mse):.4f}±{np.std(aggregated_mse):.4f}")
+        print("="*80 + "\n")
+
     # Run experiments for CDC-based filters (DR_EKF_CDC, DR_EKF_CDC_FW)
     cdc_filters = [f for f in filters_to_execute if f in ['DR_EKF_CDC', 'DR_EKF_CDC_FW']]
     for theta_x, theta_v in cdc_theta_combinations:
@@ -797,39 +833,6 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100):
                 }
                 print(f"  {filter_name}: MSE={np.mean(aggregated_mse):.4f}±{np.std(aggregated_mse):.4f}")
 
-    # Run experiments for EKF (no theta parameters)
-    ekf_filters = [f for f in filters_to_execute if f == 'EKF']
-    if ekf_filters:
-        print(f"\nRunning EKF (no theta parameters)")
-
-        theta_vals = {'theta_x': None, 'theta_v': None}  # Dummy values for EKF
-
-        experiments = Parallel(n_jobs=-1, backend='loky')(
-            delayed(run_experiment)(exp_idx, dist, num_sim, seed_base, theta_vals,
-                                   ekf_filters, T_steps, nominal_params, true_params, num_samples)
-            for exp_idx in range(num_exp)
-        )
-
-        # Aggregate results for EKF
-        for filter_name in ekf_filters:
-            aggregated_mse = []
-            aggregated_detailed_results = []
-
-            for exp in experiments:
-                if filter_name in exp:
-                    aggregated_mse.append(exp[filter_name]['mse_mean'])
-                    if 'results' in exp[filter_name]:
-                        aggregated_detailed_results.extend(exp[filter_name]['results'])
-
-            if aggregated_mse:
-                theta_key = 'no_theta'
-                all_results[filter_name][theta_key] = {
-                    'mse_mean': np.mean(aggregated_mse),
-                    'mse_std': np.std(aggregated_mse),
-                    'results': aggregated_detailed_results
-                }
-                print(f"  {filter_name}: MSE={np.mean(aggregated_mse):.4f}±{np.std(aggregated_mse):.4f}")
-    
     # Find optimal theta for each filter based on MSE
     print("\n" + "="*80)
     print("OPTIMAL THETA SELECTION")
@@ -929,7 +932,7 @@ if __name__ == "__main__":
                         help="Total simulation time")
     parser.add_argument('--T_em', default=10.0, type=float,
                         help="Horizon length for EM data generation")
-    parser.add_argument('--num_samples', default=100, type=int,
+    parser.add_argument('--num_samples', default=20, type=int,
                         help="Number of samples for nominal parameter estimation")
     args = parser.parse_args()
     main(args.dist, args.num_sim, args.num_exp, args.T_total, args.T_em, args.num_samples)

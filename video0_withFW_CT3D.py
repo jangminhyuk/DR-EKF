@@ -486,9 +486,9 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
     ax.set_box_aspect([1,1,1])
     
     # Labels and title with extra padding to avoid overlap
-    ax.set_xlabel('X position', fontsize=24, labelpad=20)
-    ax.set_ylabel('Y position', fontsize=24, labelpad=20)
-    ax.set_zlabel('Z position', fontsize=24, labelpad=20)
+    ax.set_xlabel('X position [m]', fontsize=24, labelpad=20)
+    ax.set_ylabel('Y position [m]', fontsize=24, labelpad=20)
+    ax.set_zlabel('Z position [m]', fontsize=24, labelpad=20)
     
     # Set tick label font sizes
     ax.tick_params(axis='both', which='major', labelsize=18)
@@ -719,8 +719,8 @@ def main():
                         help='Duration in seconds (if not specified, uses full trajectory)')
     parser.add_argument('--output',
                         help='Output filename (if not specified, auto-generated)')
-    parser.add_argument('--format', default='gif', choices=['gif', 'mp4'],
-                        help='Output video format (default: gif)')
+    parser.add_argument('--format', default='mp4', choices=['gif', 'mp4'],
+                        help='Output video format (default: mp4)')
     args = parser.parse_args()
     
     try:

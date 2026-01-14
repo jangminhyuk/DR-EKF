@@ -750,18 +750,18 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100,
     #print(f"Using angle gating: rho_min={rho_min}, angle_inflate={angle_inflate}")
     
     # Separate theta values for different noise sources
-    theta_x_vals = [0.05, 0.1, 0.5, 1.0]
-    theta_v_vals = [0.05, 0.1, 0.5]
-    theta_w_vals = [0.05, 0.1, 0.5, 1.0]
+    theta_x_vals = [0.1, 0.5, 1.0, 2.0]
+    theta_v_vals = [0.01, 0.05, 0.1]
+    theta_w_vals = [0.1, 0.5, 1.0, 2.0]
 
     # Fixed theta_x for TAC filter
-    tac_theta_x_fixed = 0.1
+    tac_theta_x_fixed = 0.5
 
     filters_to_execute = ['EKF', 'DR_EKF_TAC', 'DR_EKF_CDC', 'DR_EKF_CDC_FW']
     
     # Set up problem parameters for nominal estimation
     nx, ny = 7, 3
-    # Initial mean state (3D CT benchmark, no input): [px, py, pz, vx, vy, vz, omega]
+        # Initial mean state (3D CT benchmark, no input): [px, py, pz, vx, vy, vz, omega]
     x0_mean = np.array([[0.0],   # px0
                         [0.0],   # py0
                         [0.0],   # pz0
@@ -906,6 +906,39 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100,
     print(f"    theta_w values: {theta_w_vals}")
     print(f"{'='*80}\n")
 
+    # Run EKF first to establish baseline
+    print(f"{'='*80}")
+    print(f"Running EKF baseline (no robustness parameters)")
+    print(f"{'='*80}")
+    theta_vals = {'theta_x': 0.0, 'theta_v': 0.0, 'theta_w': 0.0}  # Dummy values, not used by EKF
+
+    experiments = Parallel(n_jobs=-1, backend='loky')(
+        delayed(run_experiment)(exp_idx, dist, num_sim, seed_base, theta_vals,
+                               ['EKF'], T_steps, nominal_params, true_params, num_samples)
+        for exp_idx in range(num_exp)
+    )
+
+    # Aggregate EKF results
+    filter_name = 'EKF'
+    aggregated_mse = []
+    aggregated_detailed_results = []
+
+    for exp in experiments:
+        if filter_name in exp:
+            aggregated_mse.append(exp[filter_name]['mse_mean'])
+            if 'results' in exp[filter_name]:
+                aggregated_detailed_results.extend(exp[filter_name]['results'])
+
+    if aggregated_mse:
+        all_results[filter_name]['EKF'] = {
+            'mse_mean': np.mean(aggregated_mse),
+            'mse_std': np.std(aggregated_mse),
+            'results': aggregated_detailed_results
+        }
+
+        print(f"\n{filter_name} Baseline MSE: {all_results[filter_name]['EKF']['mse_mean']:.6f} ± {all_results[filter_name]['EKF']['mse_std']:.6f}")
+    print(f"{'='*80}\n")
+
     # Run experiments for CDC and CDC-FW filters (sweep theta_x and theta_v)
     cdc_filters = ['DR_EKF_CDC', 'DR_EKF_CDC_FW']
     for theta_x, theta_v in cdc_theta_combinations:
@@ -981,36 +1014,6 @@ def main(dist, num_sim, num_exp, T_total=10.0, T_em=2.0, num_samples=100,
             }
 
             print(f"  {filter_name}: MSE = {all_results[filter_name][theta_key]['mse_mean']:.6f} ± {all_results[filter_name][theta_key]['mse_std']:.6f}")
-
-    # Run EKF once (no theta parameters)
-    print(f"Running EKF experiments (no robustness parameters)")
-    theta_vals = {'theta_x': 0.0, 'theta_v': 0.0, 'theta_w': 0.0}  # Dummy values, not used by EKF
-
-    experiments = Parallel(n_jobs=-1, backend='loky')(
-        delayed(run_experiment)(exp_idx, dist, num_sim, seed_base, theta_vals,
-                               ['EKF'], T_steps, nominal_params, true_params, num_samples)
-        for exp_idx in range(num_exp)
-    )
-
-    # Aggregate EKF results
-    filter_name = 'EKF'
-    aggregated_mse = []
-    aggregated_detailed_results = []
-
-    for exp in experiments:
-        if filter_name in exp:
-            aggregated_mse.append(exp[filter_name]['mse_mean'])
-            if 'results' in exp[filter_name]:
-                aggregated_detailed_results.extend(exp[filter_name]['results'])
-
-    if aggregated_mse:
-        all_results[filter_name]['EKF'] = {
-            'mse_mean': np.mean(aggregated_mse),
-            'mse_std': np.std(aggregated_mse),
-            'results': aggregated_detailed_results
-        }
-
-        print(f"  {filter_name}: MSE = {all_results[filter_name]['EKF']['mse_mean']:.6f} ± {all_results[filter_name]['EKF']['mse_std']:.6f}")
 
     # Find optimal theta for each filter based on MSE
     print(f"\n{'='*80}")
@@ -1120,7 +1123,7 @@ if __name__ == "__main__":
                         help="Total simulation time")
     parser.add_argument('--T_em', default=10.0, type=float,
                         help="Horizon length for EM data generation")
-    parser.add_argument('--num_samples', default=50, type=int,
+    parser.add_argument('--num_samples', default=20, type=int,
                         help="Number of samples for nominal parameter estimation")
     parser.add_argument('--rho_min', default=1e-2, type=float,
                         help="Minimum horizontal range for angle measurements (angle gating threshold)")

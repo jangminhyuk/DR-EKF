@@ -9,6 +9,7 @@ import pickle
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 
 def load_data(results_path, dist):
     """Load saved results from main0.py experiments."""
@@ -493,9 +494,9 @@ def plot_mse_heatmaps(all_results, dist):
                 else:
                     mse_matrix[i, j] = np.nan
 
-        # Create heatmap
+        # Create heatmap with log scale
         fig, ax = plt.subplots(figsize=(10, 8))
-        im = ax.imshow(mse_matrix, aspect='auto', cmap='viridis', origin='lower')
+        im = ax.imshow(mse_matrix, aspect='auto', cmap='viridis', origin='lower', norm=LogNorm())
 
         # Set ticks
         ax.set_xticks(np.arange(len(theta_x_vals)))
@@ -517,7 +518,7 @@ def plot_mse_heatmaps(all_results, dist):
             for j in range(len(theta_x_vals)):
                 if not np.isnan(mse_matrix[i, j]):
                     text = ax.text(j, i, f'{mse_matrix[i, j]:.3f}',
-                                 ha="center", va="center", color="w", fontsize=10)
+                                 ha="center", va="center", color="w", fontsize=14)
 
         plt.tight_layout()
         save_path = os.path.join(results_dir, f"mse_heatmap_{filt}_{dist}.pdf")
@@ -553,9 +554,9 @@ def plot_mse_heatmaps(all_results, dist):
                 else:
                     mse_matrix[i, j] = np.nan
 
-        # Create heatmap
+        # Create heatmap with log scale
         fig, ax = plt.subplots(figsize=(10, 8))
-        im = ax.imshow(mse_matrix, aspect='auto', cmap='viridis', origin='lower')
+        im = ax.imshow(mse_matrix, aspect='auto', cmap='viridis', origin='lower', norm=LogNorm())
 
         # Set ticks
         ax.set_xticks(np.arange(len(theta_v_vals)))
@@ -577,7 +578,7 @@ def plot_mse_heatmaps(all_results, dist):
             for j in range(len(theta_v_vals)):
                 if not np.isnan(mse_matrix[i, j]):
                     text = ax.text(j, i, f'{mse_matrix[i, j]:.3f}',
-                                 ha="center", va="center", color="w", fontsize=10)
+                                 ha="center", va="center", color="w", fontsize=14)
 
         plt.tight_layout()
         save_path = os.path.join(results_dir, f"mse_heatmap_{filt}_{dist}.pdf")

@@ -287,9 +287,9 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
     
     filter_names = {
         'EKF': "EKF",
-        'DR_EKF_CDC': "DR-EKF (CDC)",
-        'DR_EKF_TAC': "DR-EKF (TAC)",
-        'DR_EKF_CDC_FW': "DR-EKF (CDC-FW)"
+        'DR_EKF_TAC': "DR-EKF (TAC) [Ours]",
+        'DR_EKF_CDC': "DR-EKF (CDC) [Ours]",
+        'DR_EKF_CDC_FW': "DR-EKF (CDC-FW) [Ours]"
     }
     
     # Get the first available filter to extract true trajectory and determine time steps
@@ -341,8 +341,8 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
     ax.grid(True, alpha=0.3)
     # Increase tick label sizes
     ax.tick_params(axis='both', which='major', labelsize=28)
-    ax.set_xlabel('X position', fontsize=42)
-    ax.set_ylabel('Y position', fontsize=42)
+    ax.set_xlabel('X position [m]', fontsize=42)
+    ax.set_ylabel('Y position [m]', fontsize=42)
 
     # No title - time will be displayed in title position
     
@@ -381,7 +381,7 @@ def create_tracking_video(trajectory_data, filters_order, dist, output_filename,
                             weight='bold', color='darkgreen', verticalalignment='top',
                             bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
     else:
-        mode_label = ax.text(0.02, 0.90, 'MEAN TRAJECTORIES', transform=ax.transAxes, fontsize=36,
+        mode_label = ax.text(0.02, 0.90, 'MEAN TRAJECTORIES', transform=ax.transAxes, fontsize=28,
                             weight='bold', color='darkblue', verticalalignment='top',
                             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
     
@@ -498,8 +498,8 @@ def main():
                         help='Duration in seconds (if not specified, uses full trajectory)')
     parser.add_argument('--output',
                         help='Output filename (if not specified, auto-generated)')
-    parser.add_argument('--format', default='gif', choices=['gif', 'mp4'],
-                        help='Output video format (default: gif)')
+    parser.add_argument('--format', default='mp4', choices=['gif', 'mp4'],
+                        help='Output video format (default: mp4)')
     args = parser.parse_args()
     
     try:
