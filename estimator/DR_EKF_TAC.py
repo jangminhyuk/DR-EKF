@@ -90,10 +90,10 @@ class DR_EKF_TAC(BaseFilter):
                      [Z.T, Sigma_v]
                     ]) >> 0,
             X >> 0,
-            X_pred >> 0,
-            Sigma_v >> 0
-            #X_pred >> lam_min_x_nom* np.eye(self.nx),
-            #Sigma_v >> lam_min_v_nom * np.eye(self.ny)
+            #X_pred >> 0,
+            #Sigma_v >> 0
+            X_pred >> lam_min_x_nom* np.eye(self.nx),
+            Sigma_v >> lam_min_v_nom * np.eye(self.ny)
         ]
         
         prob = cp.Problem(obj, constraints)
@@ -198,10 +198,10 @@ class DR_EKF_TAC(BaseFilter):
             X_pred == A_t @ X_post_prev @ A_t.T + Sigma_w,
             X >> 0,
             X_pred >> 0,
-            Sigma_v >> 0,
-            Sigma_w >> 0
-            #Sigma_v >> lam_min_v_nom * np.eye(self.ny),
-            #Sigma_w >> lam_min_w_nom * np.eye(self.nx)
+            #Sigma_v >> 0,
+            #Sigma_w >> 0
+            Sigma_v >> lam_min_v_nom * np.eye(self.ny),
+            Sigma_w >> lam_min_w_nom * np.eye(self.nx)
         ]
         
         prob = cp.Problem(obj, constraints)

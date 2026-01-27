@@ -160,8 +160,8 @@ class DR_EKF_CDC(BaseFilter):
             X >> 0,
             X_pred >> 0,
             # Sigma_v is larger than lambda_min(Sigma_v_hat)*I
-            Sigma_v >> 0
-            #Sigma_v >> lambda_min_val * np.eye(self.ny)
+            #Sigma_v >> 0
+            Sigma_v >> lambda_min_val * np.eye(self.ny)
         ]
         
         prob = cp.Problem(obj, constraints)
